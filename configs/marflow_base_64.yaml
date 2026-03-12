@@ -1,0 +1,53 @@
+# MAR Flow Base Config for 256x256 images (Pixel Space)
+# Used with main_mar_pixel.py for pixel-space generation
+#
+# Note: mar_base sets encoder/decoder dims internally (768, 12 layers, 12 heads)
+# Only override settings not defined by mar_base
+
+model: mar_base
+
+model_config:
+  # Image settings for pixel-space generation
+  # - vae_stride=1: PatchifyVAE is identity (no downsampling)
+  # - patch_size=16: MAR groups 16x16 pixel patches
+  # - 256/16 = 16x16 = 256 tokens
+  # - token_embed_dim = 3 * 16^2 = 768 (all RGB pixels in each patch)
+  img_size: 64
+  vae_stride: 1              # Identity transform (pixel space)
+  patch_size: 4             # Each token = 16x16 RGB patch = 768 dims
+  vae_embed_dim: 3           # RGB channels
+
+  # Training settings
+  mask_ratio_min: 0.5
+  label_drop_prob: 0.1
+  attn_dropout: 0.1
+  proj_dropout: 0.1
+  buffer_size: 64
+  diffusion_batch_mul: 4
+  grad_checkpointing: true
+
+  # Flow Loss settings
+  # - in_channels = 768 (token_embed_dim)
+  # - SimpleTransformer spatial_size = sqrt(768/3) = 16
+  diffloss_class: "FlowLoss"
+  diffloss_kwargs:
+    num_sampling_steps: 50
+    net_class: "SimpleTransformer"
+    net_kwargs:
+      d_model: 384
+      d_cond: 768        # d_model과 다르게 설정 가능
+      depth: 8
+      num_heads: 6
+      patch_size: 2
+      vae_embed_dim: 3
+      mlp_ratio: 4.0
+      grad_checkpointing: true
+    P_mean: -0.6
+    P_std: 0.8
+    t_eps: 0.02
+    noise_scale: 1.0
+    sampling_method: "euler"
+    time_shift_scale: 1.0
+
+  # Sampling settings
+  num_sampling_steps: 50

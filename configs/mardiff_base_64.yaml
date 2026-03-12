@@ -1,0 +1,40 @@
+# MAR Diffusion Base Config for 64x64 images (Pixel Space)
+# Used with main_mar_pixel.py for pixel-space generation
+#
+# Note: mar_base sets encoder/decoder dims internally (768, 12 layers, 12 heads)
+# Only override settings not defined by mar_base
+
+model: mar_base
+
+model_config:
+  # Image settings for pixel-space generation
+  # - vae_stride=1: PatchifyVAE is identity (no downsampling)
+  # - patch_size=16: MAR groups 16x16 pixel patches
+  # - 64/16 = 4x4 = 16 tokens
+  # - token_embed_dim = 3 * 16^2 = 768 (all RGB pixels in each patch)
+  img_size: 64
+  vae_stride: 1              # Identity transform (pixel space)
+  patch_size: 4             # Each token = 16x16 RGB patch = 768 dims
+  vae_embed_dim: 3           # RGB channels
+
+  # Training settings
+  mask_ratio_min: 0.5
+  label_drop_prob: 0.1
+  attn_dropout: 0.1
+  proj_dropout: 0.1
+  buffer_size: 64
+  diffusion_batch_mul: 4
+  grad_checkpointing: true
+
+  # Diffusion Loss settings (SimpleMLPAdaLN)
+  # - target_channels = 768 (token_embed_dim)
+  # - z_channels = 768 (decoder_embed_dim from mar_base)
+  diffloss_class: "DiffLoss"
+  diffloss_kwargs:
+    depth: 6                 # num_res_blocks
+    width: 1024              # model_channels
+    num_sampling_steps: "100"
+    grad_checkpointing: false
+
+  # Sampling settings
+  num_sampling_steps: "100"
