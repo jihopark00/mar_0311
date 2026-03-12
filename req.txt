@@ -1,0 +1,7 @@
+einops
+timm
+opencv-python
+tensorboard
+scipy
+datasets
+wandb

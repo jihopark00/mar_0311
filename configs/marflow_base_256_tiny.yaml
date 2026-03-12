@@ -52,5 +52,5 @@ model_config:
     sampling_method: "euler"
     time_shift_scale: 1.0
 
-  # Sampling settings
-  num_sampling_steps: 30
+  # # Sampling settings
+  # num_sampling_steps: 30
