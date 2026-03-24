@@ -1,0 +1,33 @@
+# JiT Base Config for 256x256 images (Pixel Space)
+# Used with main_mar_pixel.py for pixel-space generation
+#
+# JiT (Just image Transformer) uses flow matching directly on images
+# without the masked autoregressive approach of MAR.
+
+model: jit_base
+
+model_config:
+  # Image settings
+  img_size: 256
+  vae_stride: 1              # Identity transform (pixel space)
+  patch_size: 16             # JiT-B/16 internal patch size
+
+  # # Model architecture
+  # model_type: "JiT-B/16"
+
+  # Training settings
+  label_drop_prob: 0.1
+  attn_dropout: 0.1
+  proj_dropout: 0.1
+  grad_checkpointing: true
+
+  # Flow matching parameters
+  P_mean: -0.8
+  P_std: 0.8
+  t_eps: 0.02
+  noise_scale: 1.0
+
+  # Sampling parameters
+  num_sampling_steps: 30
+  sampling_method: "euler"
+  time_shift_scale: 1.0

@@ -1,5 +1,9 @@
 
-model: mar_ssl
+dataset:
+  name: cifar10-hf
+  path: ./data
+
+model: mar_ssl_latent
 
 model_config:
   # Image settings for pixel-space generation
@@ -7,16 +11,20 @@ model_config:
   # - patch_size=16: MAR groups 16x16 pixel patches
   # - 256/16 = 16x16 = 256 tokens
   # - token_embed_dim = 3 * 16^2 = 768 (all RGB pixels in each patch)
-  img_size: 224
-  vae_stride: 1              # Identity transform (pixel space)
-  patch_size: 16             # Each token = 16x16 RGB patch = 768 dims
-  vae_embed_dim: 3           # RGB channels
+  img_size: 256
+  vae_stride: 16              # Identity transform (pixel space)
+  patch_size: 1             # Each token = 16x16 RGB patch = 768 dims
+  vae_embed_dim: 16           # RGB channels
 
   sslenc: 'dinov2_vitg14_reg'
   sslenc_class_embed_num: 32
   sslenc_class_embed_start_layer: 10
   sslenc_lora_rank: 32
   sslenc_lora_alpha: 64
+
+  sslenc_preenc_embed_dim: 768
+  sslenc_preenc_depth: 1
+  sslenc_preenc_num_heads: 16
 
   decoder_embed_dim: 1024
   decoder_depth: 2
@@ -37,18 +45,11 @@ model_config:
   diffloss_class: "FlowLoss"
   diffloss_kwargs:
     num_sampling_steps: 50
-    net_class: "SimpleTransformer"
+    net_class: "SimpleMLPAdaLN"
     net_kwargs:
-      d_model: 256
-      d_cond: 768        # d_model과 다르게 설정 가능
+      d_model: 1024
       depth: 6
-      num_heads: 4
-      patch_size: 4
-      vae_embed_dim: 3
-      mlp_ratio: 4.0
       grad_checkpointing: true
-      use_fused_attn: false
-      residual_cond: false
 
     P_mean: -0.7
     P_std: 0.8

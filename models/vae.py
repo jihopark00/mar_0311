@@ -555,6 +555,10 @@ class AutoencoderKL(nn.Module):
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
 
+        # Register ImageNet normalization as buffers
+        self.register_buffer('mean', torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.5, 0.5, 0.5]).view(1, 3, 1, 1))
+
     def init_from_ckpt(self, path):
         sd = torch.load(path, map_location="cpu")["model"]
         msg = self.load_state_dict(sd, strict=False)
@@ -566,6 +570,7 @@ class AutoencoderKL(nn.Module):
         print(f"Restored from {path}")
 
     def encode(self, x):
+        x = (x - self.mean) / self.std  # Normalize to [-1, 1]
         h = self.encoder(x)
         moments = self.quant_conv(h)
         if not self.use_variational:
@@ -576,6 +581,7 @@ class AutoencoderKL(nn.Module):
     def decode(self, z):
         z = self.post_quant_conv(z)
         dec = self.decoder(z)
+        dec = dec * self.std + self.mean  # Denormalize back to [0, 1]
         return dec
 
     def forward(self, inputs, disable=True, train=True, optimizer_idx=0):

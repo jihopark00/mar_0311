@@ -8,36 +8,27 @@ wandb_project="ssl2gen"
 wandb_entity="qkrwlgh0314"
 
 # Dataset options: cifar10-hf, tiny-imagenet-hf, mnist-hf, imagenet
-# dataset="tiny-imagenet-hf"
-# dataset="mnist-hf"
-dataset="cifar10-hf"
-run_name="0318_marssl_pixel_64_cifar10"
+run_name="0323_marssllatent_256_cifar10"
 exps_dir="./ho_mar_0311"
 config=$exps_dir/$run_name/config.yaml
 
 # ongoing: high-resolution good? 
 # TODO: clusters=8
 # Multi-GPU training (2 GPUs)
-torchrun --nnodes=1 --nproc_per_node=4 --master_port=11112 main_mar_pixel.py \
+torchrun --nnodes=1 --nproc_per_node=4 --master_port=33221 main_mar_latent.py \
+    --vae_ckpt /home/ljeadec31/opt/ssl2gen-top/mar_0311/pretrained_models/vae/kl16.ckpt \
     --config "$config" \
     --dtype "bf16" \
-    --batch_size 160 \
-    --epochs 10000 \
-    --lr 1e-4 \
-    --warmup_epochs 0 \
     --num_workers 8 \
-    --eval_freq 4 \
+    --eval_freq 10 \
     --eval_bsz 36 \
-    --num_iter 256 \
+    --save_last_freq 4 \
+    --num_iter 64 \
     --cfg 2.5 \
-    --save_last_freq 1 \
-    --dataset "${dataset}" \
     --output_dir $exps_dir \
     --run_name "${run_name}" \
-    --wandb_key "${wandb_key}" \
-    --wandb_project "${wandb_project}" \
-    --wandb_entity "${wandb_entity}" \
     --online_eval \
     --resume_last \
-    --data_path /dataset/imagenet \
-    # --debug_one_image
+    # --wandb_key "${wandb_key}" \
+    # --wandb_project "${wandb_project}" \
+    # --wandb_entity "${wandb_entity}" \

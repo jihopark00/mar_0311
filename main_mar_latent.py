@@ -1,15 +1,17 @@
 """
-Main training script for xAR Pixel models.
+Main training script for xAR Latent models.
 
-This script trains xAR models in pixel space using PatchifyVAE for image tokenization.
+This script trains xAR models in latent space using a pretrained KL-VAE for image tokenization.
 It supports multiple datasets, wandb logging, and distributed training.
 
 Usage:
-    python main_mar_pixel.py --config configs/xar_default.yaml --dataset cifar10-hf
+    python main_mar_latent.py --config configs/marflow_ssl_latent.yaml \
+        --vae_ckpt /path/to/kl16.ckpt
 
     # With wandb logging
-    python main_mar_pixel.py --config configs/xar_default.yaml \\
-        --wandb_project xar_pixel --wandb_entity your_entity
+    python main_mar_latent.py --config configs/marflow_ssl_latent.yaml \
+        --vae_ckpt /path/to/kl16.ckpt \
+        --wandb_project xar_latent --wandb_entity your_entity
 """
 
 import argparse
@@ -30,9 +32,9 @@ from util.crop import center_crop_arr
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-from models.vae import PatchifyVAE
+from models.vae import AutoencoderKL
 import models as models_mar
-from engine_mar_pixel import train_one_epoch, evaluate
+from engine_mar_latent import train_one_epoch, evaluate
 import copy
 
 
@@ -93,22 +95,27 @@ class HFImageDataset(torch.utils.data.Dataset):
 
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('xAR Pixel Training', add_help=False)
+    parser = argparse.ArgumentParser('xAR Latent Training', add_help=False)
 
     # Config
     parser.add_argument('--config', required=True, type=str,
-                        help='Path to YAML model config (e.g. configs/xar_default.yaml)')
+                        help='Path to YAML model config (e.g. configs/marflow_ssl_latent.yaml)')
 
     parser.add_argument('--batch_size', default=16, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * # gpus)')
     parser.add_argument('--epochs', default=400, type=int)
 
-    # PatchifyVAE settings
-    parser.add_argument('--patch_size', default=16, type=int,
-                        help='Patch size for PatchifyVAE')
-    parser.add_argument('--imagenet_normalize', action='store_true', default=True,
-                        help='Use ImageNet normalization in PatchifyVAE')
-    parser.add_argument('--no_imagenet_normalize', action='store_false', dest='imagenet_normalize')
+    # Pretrained VAE settings
+    parser.add_argument('--vae_ckpt', required=True, type=str,
+                        help='Path to pretrained KL-VAE checkpoint')
+    parser.add_argument('--vae_embed_dim', default=16, type=int,
+                        help='Latent channels of the pretrained VAE')
+    parser.add_argument('--vae_ch_mult', default=[1, 1, 2, 2, 4], type=int, nargs='+',
+                        help='Channel multipliers for the pretrained VAE')
+    parser.add_argument('--vae_use_variational', action='store_true', default=True,
+                        help='Use variational (KL) mode for VAE')
+    parser.add_argument('--vae_deterministic', action='store_false', dest='vae_use_variational',
+                        help='Use deterministic mode for VAE')
 
     # Generation parameters
     parser.add_argument('--num_iter', default=50, type=int,
@@ -123,7 +130,6 @@ def get_args_parser():
     parser.add_argument('--online_eval', action='store_true')
     parser.add_argument('--evaluate', action='store_true')
     parser.add_argument('--eval_bsz', type=int, default=64)
-    # parser.add_argument('--num_sampling_steps', type=int, default=None)
 
     # Optimizer
     parser.add_argument('--weight_decay', type=float, default=0.02)
@@ -137,17 +143,6 @@ def get_args_parser():
     parser.add_argument('--warmup_epochs', type=int, default=100, metavar='N')
     parser.add_argument('--ema_rate', default=0.9999, type=float)
     parser.add_argument('--grad_clip', type=float, default=3.0)
-
-    # Dataset
-    parser.add_argument('--data_path', default='./data/imagenet', type=str)
-    parser.add_argument('--dataset', default='imagenet', type=str,
-                        choices=['imagenet', 'tiny-imagenet-hf', 'cifar10-hf', 'mnist-hf', 'cifar10', 'mnist'],
-                        help='"imagenet": ImageFolder from --data_path/train; '
-                             '"tiny-imagenet-hf": load zh-plus/tiny-imagenet from HuggingFace Hub; '
-                             '"cifar10-hf": load uoft-cs-pytorch/cifar10 from HuggingFace Hub; '
-                             '"mnist-hf": load ylecun/mnist from HuggingFace Hub; '
-                             '"cifar10": torchvision CIFAR-10; '
-                             '"mnist": torchvision MNIST')
 
     parser.add_argument('--run_name', default="exp1", type=str)
     parser.add_argument('--output_dir', default='./output_dir')
@@ -202,20 +197,26 @@ def main(args):
     model_name = cfg['model']
     model_config = cfg['model_config']
 
+    # Dataset config from YAML
+    dataset_cfg = cfg['dataset']
+    args.dataset = dataset_cfg['name']
+    args.data_path = dataset_cfg.get('path', './data')
+
+    # Training config from YAML (overrides CLI defaults, but CLI explicit values win)
+    training_cfg = cfg.get('training', {})
+    _float_keys = {'lr', 'blr', 'min_lr', 'weight_decay', 'ema_rate', 'grad_clip'}
+    for key, value in training_cfg.items():
+        if hasattr(args, key):
+            if key in _float_keys:
+                value = float(value)
+            setattr(args, key, value)
+
     # CLI --grad_checkpointing flag overrides the YAML value
     if args.grad_checkpointing:
         model_config['grad_checkpointing'] = True
 
     # Reflect img_size from model config so the data pipeline uses the same value
     args.img_size = model_config.get('img_size', 256)
-
-    # Patch size for PatchifyVAE (can be overridden by CLI)
-    if 'patch_size' in model_config:
-        args.patch_size = model_config['patch_size']
-
-    # # num_sampling_steps is also used by the engine evaluate loop
-    # if args.num_sampling_steps is None:
-    #     args.num_sampling_steps = model_config.get('num_sampling_steps', 50)
 
     # ------------------------------------------------------------------
     misc.init_distributed_mode(args)
@@ -296,6 +297,7 @@ def main(args):
         dataset_train = datasets.MNIST(root=args.data_path, train=True, download=True, transform=transform_mnist)
         args.class_num = 10
     else:
+        print(f"Dataset {args.dataset}. Using ImageFolder with path: {args.data_path}")
         dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
         args.class_num = 1000
 
@@ -381,16 +383,19 @@ def main(args):
         del sample_iter, sample_images, sample_labels
 
     # ------------------------------------------------------------------
-    # PatchifyVAE
+    # Pretrained KL-VAE
     # ------------------------------------------------------------------
-    vae = PatchifyVAE(
-        imagenet_normalize=args.imagenet_normalize,
-        patch_size=model_config['vae_stride']
+    vae = AutoencoderKL(
+        embed_dim=args.vae_embed_dim,
+        ch_mult=tuple(args.vae_ch_mult),
+        use_variational=args.vae_use_variational,
+        ckpt_path=args.vae_ckpt,
     ).cuda().eval()
     for param in vae.parameters():
         param.requires_grad = False
 
-    print(f"PatchifyVAE: patch_size={model_config['vae_stride']}, imagenet_normalize={args.imagenet_normalize}")
+    print(f"AutoencoderKL: embed_dim={args.vae_embed_dim}, ch_mult={args.vae_ch_mult}, "
+          f"variational={args.vae_use_variational}, ckpt={args.vae_ckpt}")
 
     # ------------------------------------------------------------------
     # Model

@@ -3,3 +3,5 @@ ho_mar_0311/
 # pycache
 
 **/__pycache__/
+
+pretrained_models/

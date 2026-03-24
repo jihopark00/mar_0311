@@ -19,8 +19,8 @@ model_config:
   sslenc_lora_alpha: 64
 
   decoder_embed_dim: 1024
-  decoder_depth: 2
-  decoder_num_heads: 16
+  decoder_depth: 0
+  decoder_num_heads: 0
 
   # Training settings
   mask_ratio_min: 0.4
@@ -36,19 +36,20 @@ model_config:
   # - SimpleTransformer spatial_size = sqrt(768/3) = 16
   diffloss_class: "FlowLoss"
   diffloss_kwargs:
-    num_sampling_steps: 50
+    num_sampling_steps: 30
     net_class: "SimpleTransformer"
     net_kwargs:
-      d_model: 256
+      d_model: 128
       d_cond: 768        # d_model과 다르게 설정 가능
-      depth: 6
-      num_heads: 4
+      depth: 2
+      num_heads: 2
       patch_size: 4
       vae_embed_dim: 3
-      mlp_ratio: 4.0
+      mlp_ratio: 2.0
       grad_checkpointing: true
       use_fused_attn: false
       residual_cond: false
+      precise_adaln: true
 
     P_mean: -0.7
     P_std: 0.8

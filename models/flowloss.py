@@ -12,13 +12,22 @@ def modulate_seq(x, shift, scale):
     """Modulate for sequence input: x is [N, L, D], shift/scale are [N, D]"""
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
+def modulate(x, shift, scale):
+    return x * scale + shift
+
+def precise_modulate(x, shift, scale):
+    """Modulate with per-position parameters: x is [N, L, D], shift/scale are [N, L*D]"""
+    N, L, D = x.shape
+    shift = shift.view(N, L, D)
+    scale = scale.view(N, L, D)
+    return x * (1 + scale) + shift
 
 class FlowLoss(nn.Module):
     """Flow Matching Loss with x-prediction (JIT formulation)"""
     def __init__(self,
         target_channels, num_sampling_steps,
         z_channels=None,  # Accept z_channels for MAR interface compatibility
-        net_class = 'SimplePiT',
+        net_class = 'SimpleMLPAdaLN',
         net_kwargs= {},
         P_mean=0.0, P_std=1.0, t_eps=0.02, noise_scale=1.0,
         sampling_method="euler",
@@ -30,7 +39,7 @@ class FlowLoss(nn.Module):
         # Build net_kwargs: pass z_channels if provided and not already in net_kwargs
         _net_kwargs = dict(net_kwargs)
         _net_kwargs["in_channels"] = target_channels
-        if z_channels is not None and "z_channels" not in _net_kwargs:
+        if z_channels is not None :
             _net_kwargs["z_channels"] = z_channels
         self.net = eval(net_class)(**_net_kwargs)
         # SimpleMLPAdaLN(
@@ -348,17 +357,24 @@ class SimpleTransformerBlock(nn.Module):
     :param mlp_ratio: MLP hidden dim multiplier.
     :param use_fused_attn: whether to use F.scaled_dot_product_attention.
     """
-    def __init__(self, d_model, num_heads, d_cond, mlp_ratio=4.0, attn_drop=0.0, proj_drop=0.0, use_fused_attn=True):
+    def __init__(self, d_model, num_heads, d_cond, mlp_ratio=4.0, attn_drop=0.0, proj_drop=0.0, use_fused_attn=True,
+        precise_adaln = False,
+        seq_len = None,
+    ):
         super().__init__()
+        self.precise_adaln = precise_adaln
+        self.seq_len = seq_len
+        self.d_model = d_model
         self.norm1 = RMSNorm(d_model, eps=1e-6)
         self.attn = Attention(d_model, num_heads=num_heads, qkv_bias=True, qk_norm=True,
                               attn_drop=attn_drop, proj_drop=proj_drop, use_fused_attn=use_fused_attn)
         self.norm2 = RMSNorm(d_model, eps=1e-6)
         mlp_hidden_dim = int(d_model * mlp_ratio)
         self.mlp = SwiGLUFFN(d_model, mlp_hidden_dim, drop=proj_drop)
+        adaln_dim = 6 * d_model if not precise_adaln else  6 * d_model *seq_len
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(d_cond, 6 * d_model, bias=True)
+            nn.Linear(d_cond, adaln_dim, bias=True)
         )
 
     # @torch.compile
@@ -368,8 +384,15 @@ class SimpleTransformerBlock(nn.Module):
         :param c: [N, d_cond] conditioning vector.
         """
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=-1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate_seq(self.norm1(x), shift_msa, scale_msa))
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate_seq(self.norm2(x), shift_mlp, scale_mlp))
+        if self.precise_adaln:
+            N, L, D = x.shape
+            gate_msa = gate_msa.view(N, L, D)
+            gate_mlp = gate_mlp.view(N, L, D)
+            x = x + gate_msa * self.attn(precise_modulate(self.norm1(x), shift_msa, scale_msa))
+            x = x + gate_mlp * self.mlp(precise_modulate(self.norm2(x), shift_mlp, scale_mlp))
+        else:
+            x = x + gate_msa.unsqueeze(1) * self.attn(modulate_seq(self.norm1(x), shift_msa, scale_msa))
+            x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate_seq(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 
@@ -377,18 +400,26 @@ class SimpleTransformerFinalLayer(nn.Module):
     """
     Final layer with AdaLN for SimpleTransformer.
     """
-    def __init__(self, d_model, out_dim, d_cond):
+    def __init__(self, d_model, out_dim, d_cond,
+        precise_adaln = False,
+        seq_len = None,
+    ):
         super().__init__()
+        self.precise_adaln = precise_adaln
         self.norm_final = RMSNorm(d_model, eps=1e-6)
         self.linear = nn.Linear(d_model, out_dim, bias=True)
+        adaln_dim = 2 * d_model if not precise_adaln else 2 * d_model * seq_len
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(d_cond, 2 * d_model, bias=True)
+            nn.Linear(d_cond, adaln_dim, bias=True)
         )
     # @torch.compile
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=-1)
-        x = modulate_seq(self.norm_final(x), shift, scale)
+        if self.precise_adaln:
+            x = precise_modulate(self.norm_final(x), shift, scale)
+        else:
+            x = modulate_seq(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
 
@@ -425,6 +456,7 @@ class SimpleTransformer(nn.Module):
         grad_checkpointing=False,
         use_fused_attn=True,
         residual_cond = False,
+        precise_adaln = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -435,6 +467,7 @@ class SimpleTransformer(nn.Module):
         self.vae_embed_dim = vae_embed_dim
         self.grad_checkpointing = grad_checkpointing
         self.residual_cond = residual_cond
+        self.precise_adaln = precise_adaln
 
         # Compute spatial dimensions
         # in_channels = vae_embed_dim * H * W where H, W are spatial dims of VAE latent
@@ -458,12 +491,14 @@ class SimpleTransformer(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList([
-            SimpleTransformerBlock(d_model, num_heads, self.d_cond, mlp_ratio, attn_drop, proj_drop, use_fused_attn)
+            SimpleTransformerBlock(d_model, num_heads, self.d_cond, mlp_ratio, attn_drop, proj_drop, use_fused_attn,
+                precise_adaln=precise_adaln, seq_len=self.num_patches)
             for _ in range(depth)
         ])
 
         # Final layer
-        self.final_layer = SimpleTransformerFinalLayer(d_model, patch_dim, self.d_cond)
+        self.final_layer = SimpleTransformerFinalLayer(d_model, patch_dim, self.d_cond,
+            precise_adaln=precise_adaln, seq_len=self.num_patches)
 
         self.initialize_weights()
 
@@ -568,6 +603,31 @@ class SimpleTransformer(nn.Module):
 
         return x
 
+class FullTransformer(nn.Module):
+    def forward(self, x, t, c, attn_mask=None):
+        """
+        Apply the model to an input batch.
+        :param x: an [N, C] Tensor of inputs, N = batch_size * L,  (C = vae_embed_dim * H * W).
+        :param t: a 1-D batch of timesteps.
+        :param c: [N, z_channels] conditioning from AR transformer.
+        :return: an [N, C] Tensor of outputs.
+        """
+        N, C = x.shape
+        L = ...
+        B = N // L # it may include diffusion_batch_mul
+        
+        x = x.reshape(B, L, -1)
+        c = c.reshape(B, L, -1)
+
+        x = self.x_embedder(x)
+        c = self.c_embed(c)
+        x = x + c
+        for block in self.blocks:
+            x = block(x, c, attn_mask=attn_mask)
+        x = self.final_layer(x, c)
+        x = x.reshape(N, C)
+        return x
+
 
 class SimpleMLPAdaLN(nn.Module):
     """
@@ -579,17 +639,30 @@ class SimpleMLPAdaLN(nn.Module):
     :param num_res_blocks: number of residual blocks per downsample.
     """
 
+    # def __init__(
+    #     self,
+    #     in_channels,
+    #     model_channels,
+    #     out_channels,
+    #     z_channels,
+    #     num_res_blocks,
+    #     grad_checkpointing=False
+    # ):
     def __init__(
         self,
         in_channels,
-        model_channels,
-        out_channels,
         z_channels,
-        num_res_blocks,
+        d_model,
+        depth,
+        out_channels=None,
         grad_checkpointing=False
     ):
         super().__init__()
+        model_channels = d_model
+        num_res_blocks = depth
+        out_channels = out_channels if out_channels is not None else in_channels
 
+        
         self.in_channels = in_channels
         self.model_channels = model_channels
         self.out_channels = out_channels

@@ -1,0 +1,33 @@
+# JiT Large Config for 256x256 images with patch_size=32 (Pixel Space)
+# Used with main_mar_pixel.py for pixel-space generation
+#
+# JiT (Just image Transformer) uses flow matching directly on images
+# Patch size 32 means fewer tokens (8x8=64) for faster training/inference
+
+model: jit_large_32
+
+model_config:
+  # Image settings
+  img_size: 256
+  vae_stride: 1              # Identity transform (pixel space)
+  patch_size: 32             # JiT-L/32 internal patch size (fewer tokens)
+
+  # Model architecture
+  model_type: "JiT-L/32"
+
+  # Training settings
+  label_drop_prob: 0.1
+  attn_dropout: 0.1
+  proj_dropout: 0.1
+  grad_checkpointing: true
+
+  # Flow matching parameters
+  P_mean: 0.0
+  P_std: 1.0
+  t_eps: 0.02
+  noise_scale: 1.0
+
+  # Sampling parameters
+  num_sampling_steps: 50
+  sampling_method: "euler"
+  time_shift_scale: 1.0
