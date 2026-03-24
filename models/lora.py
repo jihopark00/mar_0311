@@ -14,13 +14,16 @@ def iter_named_trainable_params(module: nn.Module):
 
 def set_ssl_encoder_mode(model, mode: str,
                              lora_r: int = 8, lora_alpha: int = 16, lora_dropout: float = 0.0,
-                             lora_targets=("qkv", "proj", "fc1", "fc2")):
+                             lora_targets=("qkv", "proj", "fc1", "fc2"),
+                             full_train_layer_list=None):
     """
     mode: "freeze" | "full" | "lora"
+    full_train_layer_list: list of block indices to fully unfreeze (skipping LoRA for those blocks)
     """
     mode = mode.lower()
     if mode not in {"freeze", "full", "lora"}:
         raise ValueError(f"Unknown mode: {mode}")
+    full_train_layer_list = set(full_train_layer_list or [])
 
     if mode == "freeze":
         set_requires_grad(model, False)
@@ -31,23 +34,34 @@ def set_ssl_encoder_mode(model, mode: str,
     elif mode == "lora":
         # freeze encoder
         set_requires_grad(model, False)
-        # inject LoRA into selected Linear layers
+        # inject LoRA into selected Linear layers, skipping full-train blocks
+        skip_modules = {model.blocks[i] for i in full_train_layer_list} if hasattr(model, 'blocks') else set()
         apply_lora_to_vit(model, target_linear_names=lora_targets,
-                            r=lora_r, alpha=lora_alpha, dropout=lora_dropout)
+                            r=lora_r, alpha=lora_alpha, dropout=lora_dropout,
+                            skip_modules=skip_modules)
 
         # ensure LoRA params are trainable (base weights remain frozen)
         for n, p in model.named_parameters():
             if "lora_A" in n or "lora_B" in n:
                 p.requires_grad = True
+
+    # fully unfreeze selected layers
+    if hasattr(model, 'blocks') and full_train_layer_list:
+        for layer_idx in full_train_layer_list:
+            set_requires_grad(model.blocks[layer_idx], True)
                 
 def apply_lora_to_vit(module: nn.Module, target_linear_names=("qkv", "proj", "fc1", "fc2"),
-                      r=8, alpha=16, dropout=0.0):
+                      r=8, alpha=16, dropout=0.0, skip_modules=None):
     """
     Replaces selected nn.Linear layers with LoRALinear in-place.
+    skip_modules: set of modules to skip (no LoRA injection).
     """
+    skip_modules = skip_modules or set()
     for name, child in list(module.named_children()):
+        if child in skip_modules:
+            continue
         # recurse first
-        apply_lora_to_vit(child, target_linear_names, r, alpha, dropout)
+        apply_lora_to_vit(child, target_linear_names, r, alpha, dropout, skip_modules)
 
         # then replace if this is a target Linear
         if isinstance(child, nn.Linear) and any(t in name for t in target_linear_names):

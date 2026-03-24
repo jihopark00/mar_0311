@@ -708,7 +708,7 @@ class SimpleMLPAdaLN(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    @torch.compile
+    # @torch.compile
     def forward(self, x, t, c):
         """
         Apply the model to an input batch.

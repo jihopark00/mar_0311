@@ -39,8 +39,11 @@ class MARSSL_Latent(nn.Module):
         sslenc ='dinov2_vitg14_reg',
         sslenc_class_embed_num = 32,
         sslenc_class_embed_start_layer = 10,
+        sslenc_full_train_layer_list = [],
         sslenc_lora_rank = 8,
         sslenc_lora_alpha = 16,
+        sslenc_learnable_mask_token = False,
+        
         sslenc_block_start = 0,
         sslenc_preenc_embed_dim = 1024,
         sslenc_preenc_depth = 0,
@@ -92,17 +95,18 @@ class MARSSL_Latent(nn.Module):
         self.encoder_embed_dim = encoder_embed_dim
         # reset sslenc blocks
         self.sslenc_block_start = sslenc_block_start
-        sslenc.blocks = sslenc.blocks[sslenc_block_start:]
+        # sslenc.blocks = sslenc.blocks[sslenc_block_start:]
         
         self.sslenc_preenc_depth = sslenc_preenc_depth
         sslenc_preenc_pos_embed = get_2d_sincos_pos_embed(sslenc_preenc_embed_dim, self.seq_h)
         self.sslenc_preenc_pos_embed = nn.Parameter(torch.from_numpy(sslenc_preenc_pos_embed).float().unsqueeze(0), requires_grad=False)
-        self.sslenc_preenc_mask_token = nn.Parameter(torch.zeros(1, 1, sslenc_preenc_embed_dim))
-        self.sslenc_preenc_proj_in = nn.Linear(self.token_embed_dim, sslenc_preenc_embed_dim, bias=True) 
-        self.sslenc_preenc_blocks = nn.ModuleList([
-            Block(sslenc_preenc_embed_dim, sslenc_preenc_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
-                  proj_drop=proj_dropout, attn_drop=attn_dropout) for _ in range(sslenc_preenc_depth)])
-        self.sslenc_preenc_norm = norm_layer(sslenc_preenc_embed_dim)
+        self.sslenc_preenc_proj_in = nn.Linear(self.token_embed_dim, sslenc_preenc_embed_dim, bias=True)
+        if sslenc_preenc_depth > 0:
+            self.sslenc_preenc_mask_token = nn.Parameter(torch.zeros(1, 1, sslenc_preenc_embed_dim))
+            self.sslenc_preenc_blocks = nn.ModuleList([
+                Block(sslenc_preenc_embed_dim, sslenc_preenc_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
+                      proj_drop=proj_dropout, attn_drop=attn_dropout) for _ in range(sslenc_preenc_depth)])
+            self.sslenc_preenc_norm = norm_layer(sslenc_preenc_embed_dim)
         self.sslenc_enc_proj_out = nn.Linear(sslenc_preenc_embed_dim, encoder_embed_dim, bias=True)
         # --------------------------------------------------------------------------
         # Class Embedding
@@ -161,20 +165,26 @@ class MARSSL_Latent(nn.Module):
         # SSL Encoder
         self.sslenc = sslenc
 
-        # apply lora
+        # apply lora / freeze, with full training for selected layers
         self.sslenc_lora_rank = sslenc_lora_rank
         self.sslenc_lora_alpha = sslenc_lora_alpha
         if sslenc_lora_rank > 0:
-            set_ssl_encoder_mode(self.sslenc, mode="lora", lora_r=sslenc_lora_rank, lora_alpha=sslenc_lora_alpha)
+            set_ssl_encoder_mode(self.sslenc, mode="lora", lora_r=sslenc_lora_rank, lora_alpha=sslenc_lora_alpha,
+                                 full_train_layer_list=sslenc_full_train_layer_list)
         else:
-            set_ssl_encoder_mode(self.sslenc, mode="freeze")
+            set_ssl_encoder_mode(self.sslenc, mode="freeze",
+                                 full_train_layer_list=sslenc_full_train_layer_list)
+
+        if sslenc_learnable_mask_token:
+            self.sslenc.mask_token.requires_grad = True
 
     def initialize_weights(self):
         # parameters
         torch.nn.init.normal_(self.class_emb.weight, std=.02)
         torch.nn.init.normal_(self.fake_latent, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
-        torch.nn.init.normal_(self.sslenc_preenc_mask_token, std=.02)
+        if self.sslenc_preenc_depth > 0:
+            torch.nn.init.normal_(self.sslenc_preenc_mask_token, std=.02)
         torch.nn.init.normal_(self.class_emb_pos_embed, std=.02)
         # torch.nn.init.normal_(self.encoder_pos_embed_learned, std=.02)
         torch.nn.init.normal_(self.decoder_pos_embed_learned, std=.02)
@@ -264,7 +274,7 @@ class MARSSL_Latent(nn.Module):
 
             for blk in self.sslenc_preenc_blocks:
                 x = _forward(blk, x)
-        x = self.sslenc_preenc_norm(x)
+            x = self.sslenc_preenc_norm(x)
         x = self.sslenc_enc_proj_out(x)
 
         # apply mask
@@ -294,7 +304,7 @@ class MARSSL_Latent(nn.Module):
         else:
             def _forward(blk, x):
                 return blk(x)
-        for i, blk in enumerate(sslenc.blocks):
+        for i, blk in enumerate(sslenc.blocks[self.sslenc_block_start:]):
             if self.sslenc_class_embed_num > 0 and i == self.sslenc_class_embed_start_layer:
                 class_embedding = class_embedding + self.class_emb_pos_embed
                 x = torch.cat([class_embedding, x], dim=1)

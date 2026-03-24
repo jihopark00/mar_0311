@@ -8,7 +8,7 @@ wandb_project="ssl2gen"
 wandb_entity="qkrwlgh0314"
 
 # Dataset options: cifar10-hf, tiny-imagenet-hf, mnist-hf, imagenet
-run_name="0323_marssllatent_256_cifar10"
+run_name="0323_marssllatent_256_cifar10_open8"
 exps_dir="./ho_mar_0311"
 config=$exps_dir/$run_name/config.yaml
 
@@ -22,7 +22,7 @@ torchrun --nnodes=1 --nproc_per_node=4 --master_port=33221 main_mar_latent.py \
     --num_workers 8 \
     --eval_freq 10 \
     --eval_bsz 36 \
-    --save_last_freq 4 \
+    --save_last_freq 1 \
     --num_iter 64 \
     --cfg 2.5 \
     --output_dir $exps_dir \
