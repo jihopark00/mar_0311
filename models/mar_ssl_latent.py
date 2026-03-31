@@ -37,6 +37,7 @@ class MARSSL_Latent(nn.Module):
     """
     def __init__(self, 
         sslenc ='dinov2_vitg14_reg',
+        sslenc_pretrained=True,
         sslenc_class_embed_num = 32,
         sslenc_class_embed_start_layer = 10,
         sslenc_full_train_layer_list = [],
@@ -76,7 +77,7 @@ class MARSSL_Latent(nn.Module):
                  ):
         super().__init__()
 
-        sslenc = torch.hub.load('facebookresearch/dinov2', sslenc, pretrained=True) # TODO:check if it's weight is not init
+        sslenc = torch.hub.load('facebookresearch/dinov2', sslenc, pretrained=sslenc_pretrained) # TODO:check if it's weight is not init
         # --------------------------------------------------------------------------
         # VAE and patchify specifics
         self.vae_embed_dim = vae_embed_dim
