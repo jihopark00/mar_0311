@@ -9,3 +9,4 @@ from .jit import jit_base, jit_large, jit_huge, jit_base_32, jit_large_32, jit_h
 from .mar_ssl import mar_ssl
 from .mar_full import MARFull, mar_full_base, mar_full_large, mar_full_huge
 from .mar_ssl_latent import mar_ssl_latent
+from .mar_original import mar_original_base, mar_original_large, mar_original_huge

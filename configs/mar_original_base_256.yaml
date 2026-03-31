@@ -1,0 +1,43 @@
+# Original MAR Base Config for 256x256 ImageNet (Latent Space with KL16 VAE)
+# Used with main_mar_latent.py
+#
+# mar_original_base sets encoder/decoder: 768 dim, 12 layers, 12 heads
+# DiffLoss (DDPM-based) with SimpleMLPAdaLN
+
+dataset:
+  name: imagenet
+  path: /dataset/imagenet
+
+training:
+  batch_size: 320
+  epochs: 100000
+  lr: 1e-4
+  blr: 1e-4
+  min_lr: 0.0
+  lr_schedule: constant
+  warmup_epochs: 0
+  weight_decay: 0.02
+  ema_rate: 0.9999
+  grad_clip: 3.0
+
+model: mar_original_base
+
+model_config:
+  img_size: 256
+  vae_stride: 16
+  patch_size: 1
+  vae_embed_dim: 16
+
+  # Training settings
+  mask_ratio_min: 0.7
+  label_drop_prob: 0.1
+  attn_dropout: 0.1
+  proj_dropout: 0.1
+  buffer_size: 64
+  diffusion_batch_mul: 4
+  grad_checkpointing: true
+
+  # DiffLoss settings (DDPM with SimpleMLPAdaLN)
+  diffloss_d: 3
+  diffloss_w: 1024
+  num_sampling_steps: "100"
