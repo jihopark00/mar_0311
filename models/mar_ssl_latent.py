@@ -40,10 +40,13 @@ class MARSSL_Latent(nn.Module):
         sslenc_pretrained=True,
         sslenc_class_embed_num = 32,
         sslenc_class_embed_start_layer = 10,
+
+        sslenc_tuning_mode = "lora", # "freeze" | "full" | "lora"
         sslenc_full_train_layer_list = [],
         sslenc_lora_rank = 8,
         sslenc_lora_alpha = 16,
         sslenc_learnable_mask_token = False,
+
         sslenc_use_repa=False,
         sslenc_repa_loss_weight=0.0,
         sslenc_repa_save_vram=False,
@@ -176,12 +179,14 @@ class MARSSL_Latent(nn.Module):
         # apply lora / freeze, with full training for selected layers
         self.sslenc_lora_rank = sslenc_lora_rank
         self.sslenc_lora_alpha = sslenc_lora_alpha
-        if sslenc_lora_rank > 0:
-            set_ssl_encoder_mode(self.sslenc, mode="lora", lora_r=sslenc_lora_rank, lora_alpha=sslenc_lora_alpha,
-                                 full_train_layer_list=sslenc_full_train_layer_list)
-        else:
-            set_ssl_encoder_mode(self.sslenc, mode="freeze",
-                                 full_train_layer_list=sslenc_full_train_layer_list)
+        set_ssl_encoder_mode(self.sslenc, mode=sslenc_tuning_mode, lora_r=sslenc_lora_rank, lora_alpha=sslenc_lora_alpha,
+                             full_train_layer_list=sslenc_full_train_layer_list)
+        # if sslenc_lora_rank > 0:
+        #     set_ssl_encoder_mode(self.sslenc, mode="lora", lora_r=sslenc_lora_rank, lora_alpha=sslenc_lora_alpha,
+        #                          full_train_layer_list=sslenc_full_train_layer_list)
+        # else:
+        #     set_ssl_encoder_mode(self.sslenc, mode="freeze",
+        #                          full_train_layer_list=sslenc_full_train_layer_list)
 
         if sslenc_learnable_mask_token:
             self.sslenc.mask_token.requires_grad = True
