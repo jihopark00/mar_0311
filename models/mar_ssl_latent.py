@@ -193,6 +193,8 @@ class MARSSL_Latent(nn.Module):
 
         if sslenc_learnable_mask_token:
             self.sslenc.mask_token.requires_grad = True
+        else:
+            self.sslenc.mask_token.requires_grad = False
 
         if self.sslenc_use_repa:
             _sslenc_repa = torch.hub.load('facebookresearch/dinov2', sslenc, pretrained=True)

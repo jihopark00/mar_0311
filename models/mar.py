@@ -244,7 +244,7 @@ class MAR(nn.Module):
         loss = self.diffloss(z=z, target=target, mask=mask)
         return loss
 
-    def forward(self, imgs, labels):
+    def forward(self, imgs, labels, *args, **kwargs):
 
         # class embed
         class_embedding = self.class_emb(labels)
