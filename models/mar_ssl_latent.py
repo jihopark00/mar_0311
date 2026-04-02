@@ -181,6 +181,9 @@ class MARSSL_Latent(nn.Module):
         self.sslenc_lora_alpha = sslenc_lora_alpha
         set_ssl_encoder_mode(self.sslenc, mode=sslenc_tuning_mode, lora_r=sslenc_lora_rank, lora_alpha=sslenc_lora_alpha,
                              full_train_layer_list=sslenc_full_train_layer_list)
+        # patch_embed is not used in forward (we feed pre-patchified latents), so freeze it
+        for p in self.sslenc.patch_embed.parameters():
+            p.requires_grad = False
         # if sslenc_lora_rank > 0:
         #     set_ssl_encoder_mode(self.sslenc, mode="lora", lora_r=sslenc_lora_rank, lora_alpha=sslenc_lora_alpha,
         #                          full_train_layer_list=sslenc_full_train_layer_list)
