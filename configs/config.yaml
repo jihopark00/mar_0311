@@ -1,0 +1,106 @@
+dataset:
+  name: imagenet # Dataset options: cifar10-hf, tiny-imagenet-hf, mnist-hf, imagenet
+  path: /dataset/imagenet
+
+training:
+  batch_size: 320
+  epochs: 100000
+  lr: 1e-4            # absolute lr (if set, overrides blr scaling)
+  blr: 1e-4           # base lr: absolute_lr = blr * total_batch_size / 256
+  min_lr: 0.0
+  lr_schedule: constant
+  warmup_epochs: 0
+  weight_decay: 0.02
+  ema_rate: 0.9999
+  grad_clip: 3.0
+
+vae: AutoencoderKL
+vae_config:
+  embed_dim: 16
+  ch_mult: [1, 1, 2, 2, 4]
+  ckpt_path: pretrained_models/vae/kl16.ckpt
+  use_variational: true
+  latent_mean: 0.0
+  latent_std: 4.3011
+
+# vae: RAE
+# vae_config:
+#   encoder_cls: 'Dinov2withNorm'
+#   encoder_config_path: 'facebook/dinov2-with-registers-base'
+#   encoder_input_size: 224
+#   encoder_params:
+#     dinov2_path: 'facebook/dinov2-with-registers-base'
+#     normalize: true
+#   decoder_config_path: 'configs/dinov2b_decoder_vitxl'
+#   pretrained_decoder_path: 'RAE-collections/decoders/dinov2/wReg_base/ViTXL_n08/model.pt'
+#   noise_tau: 0.0
+#   reshape_to_2d: true
+#   normalization_stat_path: 'RAE-collections/stats/dinov2/wReg_base/imagenet1k/stat.pt'
+
+model: mar_ssl_latent
+
+model_config:
+  # Image settings for pixel-space generation
+  # - vae_stride=1: PatchifyVAE is identity (no downsampling)
+  # - patch_size=16: MAR groups 16x16 pixel patches
+  # - 256/16 = 16x16 = 256 tokens
+  # - token_embed_dim = 3 * 16^2 = 768 (all RGB pixels in each patch)
+  img_size: 256
+  vae_stride: 16              # Identity transform (pixel space)
+  patch_size: 1             # Each token = 16x16 RGB patch = 768 dims
+  vae_embed_dim: 16           # RGB channels
+
+  sslenc: 'dinov2_vitb14_reg'
+  sslenc_class_embed_num: 32
+  sslenc_class_embed_start_layer: 2
+  sslenc_full_train_layer_list: [0,1,2,3,4,5,6,7,8,9,10,11]
+  sslenc_lora_rank: 32
+  sslenc_lora_alpha: 64
+
+  sslenc_preenc_embed_dim: 768
+  sslenc_preenc_depth: 0
+  sslenc_preenc_num_heads: 16
+
+  decoder_embed_dim: 1024
+  decoder_depth: 8
+  decoder_num_heads: 16
+
+  # Training settings
+  mask_ratio_min: 0.7
+  label_drop_prob: 0.1
+  attn_dropout: 0.1
+  proj_dropout: 0.1
+  # buffer_size: 64
+  diffusion_batch_mul: 4
+  grad_checkpointing: true
+
+  # Flow Loss settings
+  # - in_channels = 768 (token_embed_dim)
+  # - SimpleTransformer spatial_size = sqrt(768/3) = 16
+  diffloss_class: "FlowLoss"
+  diffloss_kwargs:
+    num_sampling_steps: 50
+    net_class: "SimpleMLPAdaLN"
+    net_kwargs:
+      d_model: 1024
+      depth: 6
+      grad_checkpointing: true
+
+    P_mean: -0.4
+    P_std: 1.0
+    t_eps: 0.05
+    noise_scale: 1.0
+    sampling_method: "euler"
+    time_shift_scale: 1.0 # Flow Loss settings
+
+
+  # diffloss_class: "DiffLoss"
+  # diffloss_kwargs:
+  #   depth: 6
+  #   width: 1024
+  #   num_sampling_steps: "50"
+  #   grad_checkpointing: true
+
+
+  # Sampling settings
+  # num_sampling_steps: 30

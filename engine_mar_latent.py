@@ -92,7 +92,7 @@ def train_one_epoch(
 
         # Forward pass
         with torch.cuda.amp.autocast(dtype=args.amp_dtype):
-            loss = model(x, labels)
+            loss, loss_log = model(x, labels)
 
         loss_value = loss.item()
 
@@ -110,6 +110,8 @@ def train_one_epoch(
         update_ema(ema_params, model_params, rate=args.ema_rate)
 
         metric_logger.update(loss=loss_value)
+        for key, value in loss_log.items():
+            metric_logger.update(**{key: value})
 
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
@@ -121,15 +123,20 @@ def train_one_epoch(
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('lr', lr, epoch_1000x)
+            for key, value in loss_log.items():
+                log_writer.add_scalar(f'train_{key}', value, epoch_1000x)
 
         if wandb_run is not None:
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
-            wandb_run.log({
+            wandb_log = {
                 'train_loss': loss_value_reduce,
                 'lr': lr,
                 'epoch': epoch,
                 'step': epoch_1000x,
-            }, step=epoch_1000x)
+            }
+            for key, value in loss_log.items():
+                wandb_log[f'train_{key}'] = value
+            wandb_run.log(wandb_log, step=epoch_1000x)
 
     # Gather stats from all processes
     metric_logger.synchronize_between_processes()

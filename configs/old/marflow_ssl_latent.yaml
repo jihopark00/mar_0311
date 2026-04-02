@@ -3,6 +3,19 @@ dataset:
   name: cifar10-hf
   path: ./data
 
+# VAE configuration (used by main_mar.py)
+# To swap VAE, change class + kwargs here — no code changes needed.
+# Normalization in engine: z_norm = (z_raw - latent_mean) / latent_std
+vae:
+  class: AutoencoderKL
+  kwargs:
+    embed_dim: 16
+    ch_mult: [1, 1, 2, 2, 4]
+    use_variational: true
+    ckpt_path: /home/ljeadec31/opt/ssl2gen-top/mar_0311/pretrained_models/vae/kl16.ckpt
+    latent_mean: 0.0
+    latent_std: 4.3011          # 1/0.2325, raw latent std of KL-16
+
 model: mar_ssl_latent
 
 model_config:

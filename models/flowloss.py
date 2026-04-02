@@ -23,7 +23,7 @@ def precise_modulate(x, shift, scale):
     return x * (1 + scale) + shift
 
 class FlowLoss(nn.Module):
-    """Flow Matching Loss with x-prediction (JIT formulation)"""
+    """Flow Matching Loss with configurable prediction and loss types."""
     def __init__(self,
         target_channels, num_sampling_steps,
         z_channels=None,  # Accept z_channels for MAR interface compatibility
@@ -31,7 +31,9 @@ class FlowLoss(nn.Module):
         net_kwargs= {},
         P_mean=0.0, P_std=1.0, t_eps=0.02, noise_scale=1.0,
         sampling_method="euler",
-        time_shift_scale=1.0
+        time_shift_scale=1.0,
+        pred_type="x",   # "x" = x-prediction, "v" = velocity prediction
+        loss_type="v",   # "v" = velocity loss, "x" = x-prediction loss
         ):
         super(FlowLoss, self).__init__()
 
@@ -42,14 +44,11 @@ class FlowLoss(nn.Module):
         if z_channels is not None :
             _net_kwargs["z_channels"] = z_channels
         self.net = eval(net_class)(**_net_kwargs)
-        # SimpleMLPAdaLN(
-        #     in_channels=target_channels,
-        #     model_channels=width,
-        #     out_channels=target_channels,  # x-prediction
-        #     z_channels=z_channels,
-        #     num_res_blocks=depth,
-        #     grad_checkpointing=grad_checkpointing
-        # )
+
+        assert pred_type in ("x", "v"), f"pred_type must be 'x' or 'v', got '{pred_type}'"
+        assert loss_type in ("x", "v"), f"loss_type must be 'x' or 'v', got '{loss_type}'"
+        self.pred_type = pred_type
+        self.loss_type = loss_type
 
         # flow matching params
         self.P_mean = P_mean
@@ -77,19 +76,29 @@ class FlowLoss(nn.Module):
         bsz = target.shape[0]
         t = self.sample_t(bsz, device=target.device).view(-1, 1)
         e = torch.randn_like(target) * self.noise_scale
-        
+
         # interpolate: z_t = t * x + (1-t) * noise
+        cond = z
         z_t = t * target + (1 - t) * e
-        # target velocity
-        v = (target - z_t) / (1 - t).clamp_min(self.t_eps)
 
-        # x-prediction
-        x_pred = self.net(z_t, t.flatten(), z)
-        # predicted velocity from x-prediction
-        v_pred = (x_pred - z_t) / (1 - t).clamp_min(self.t_eps)
+        # network prediction
+        net_out = self.net(z_t, t.flatten(), cond)
 
-        # velocity loss
-        loss = (v - v_pred) ** 2
+        # derive x_pred and v_pred from network output
+        if self.pred_type == "x":
+            one_minus_t = (1 - t).clamp_min(self.t_eps)
+            x_pred = net_out
+            v_pred = (x_pred - z_t) / one_minus_t
+            v_target = (target - z_t) / one_minus_t
+        else:  # pred_type == "v"
+            v_pred = net_out
+            x_pred = z_t + (1 - t) * v_pred
+            v_target = target - e
+        # compute loss
+        if self.loss_type == "v":
+            loss = (v_target - v_pred) ** 2
+        else:  # loss_type == "x"
+            loss = (target - x_pred) ** 2
         loss = loss.mean(dim=-1)
 
         if mask is not None:
@@ -151,9 +160,11 @@ class FlowLoss(nn.Module):
         """
         t_input = t.view(-1, 1)
 
-        # x-prediction
-        x_pred = self.net(x, t, z)
-        v_pred = (x_pred - x) / (1.0 - t_input).clamp_min(self.t_eps)
+        net_out = self.net(x, t, z)
+        if self.pred_type == "x":
+            v_pred = (net_out - x) / (1.0 - t_input).clamp_min(self.t_eps)
+        else:  # pred_type == "v"
+            v_pred = net_out
 
         if cfg != 1.0:
             # split cond/uncond predictions

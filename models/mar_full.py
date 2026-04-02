@@ -327,8 +327,9 @@ class MARFull(nn.Module):
 
         # Flow loss (full sequence)
         loss = self.forward_loss(z=z, target=gt_latents, mask=mask)
+        loss_log = {"loss": loss.item()}
 
-        return loss
+        return loss, loss_log
 
     def sample_tokens(
         self,

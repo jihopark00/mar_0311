@@ -474,10 +474,13 @@ class PatchifyVAE(nn.Module):
     IMAGENET_MEAN = [0.485, 0.456, 0.406]
     IMAGENET_STD = [0.229, 0.224, 0.225]
 
-    def __init__(self, patch_size=1, imagenet_normalize=True):
+    def __init__(self, patch_size=1, imagenet_normalize=True,
+                 latent_mean=0.0, latent_std=1.0):
         super().__init__()
         self.patch_size = patch_size
         self.imagenet_normalize = imagenet_normalize
+        self.latent_mean = latent_mean
+        self.latent_std = latent_std
 
         # Register ImageNet normalization as buffers
         self.register_buffer('mean', torch.tensor(self.IMAGENET_MEAN).view(1, 3, 1, 1))
@@ -496,54 +499,50 @@ class PatchifyVAE(nn.Module):
         return x
 
     def encode(self, x):
-        """
-        Encode image to representation.
+        """Encode image to normalized latent tensor.
 
         Args:
-            x: [B, 3, H, W] input images (assumed to be in [0, 1])
+            x: [B, 3, H, W] input images in [0, 1]
 
         Returns:
-            DeterministicDistribution wrapping the encoded representation
+            [B, C, h, w] normalized latent tensor
         """
-        # Normalize
         x = self.normalize(x)
 
-        # If patch_size > 1, do spatial downsampling via average pooling
         if self.patch_size > 1:
             p = self.patch_size
             B, C, H, W = x.shape
             x = x.unfold(2, p, p).unfold(3, p, p)  # [B, C, H//p, W//p, p, p]
             x = x.mean(dim=(-2, -1))  # [B, C, H//p, W//p]
 
-        return DeterministicDistribution(x)
+        return (x - self.latent_mean) / self.latent_std
 
-    def decode(self, x):
-        """
-        Decode representation back to image.
+    def decode(self, z):
+        """Decode normalized latent back to image.
 
         Args:
-            x: [B, C, h, w] encoded representation
+            z: [B, C, h, w] normalized latent tensor
 
         Returns:
             [B, 3, H, W] reconstructed image
         """
-        # If patch_size > 1, upsample back
+        z = z * self.latent_std + self.latent_mean
+
         if self.patch_size > 1:
             p = self.patch_size
-            B, C, h, w = x.shape
-            x = x.unsqueeze(-1).unsqueeze(-1)  # [B, C, h, w, 1, 1]
-            x = x.expand(B, C, h, w, p, p)  # [B, C, h, w, p, p]
-            x = x.permute(0, 1, 2, 4, 3, 5)  # [B, C, h, p, w, p]
-            x = x.reshape(B, C, h * p, w * p)  # [B, C, H, W]
+            B, C, h, w = z.shape
+            z = z.unsqueeze(-1).unsqueeze(-1)
+            z = z.expand(B, C, h, w, p, p)
+            z = z.permute(0, 1, 2, 4, 3, 5)
+            z = z.reshape(B, C, h * p, w * p)
 
-        # Denormalize
-        x = self.denormalize(x)
-
-        return x
+        z = self.denormalize(z)
+        return z
 
 
 class AutoencoderKL(nn.Module):
-    def __init__(self, embed_dim, ch_mult, use_variational=True, ckpt_path=None):
+    def __init__(self, embed_dim, ch_mult, use_variational=True, ckpt_path=None,
+                 do_normalization=True, latent_mean=0.0, latent_std=1.0):
         super().__init__()
         self.encoder = Encoder(ch_mult=ch_mult, z_channels=embed_dim)
         self.decoder = Decoder(ch_mult=ch_mult, z_channels=embed_dim)
@@ -552,6 +551,9 @@ class AutoencoderKL(nn.Module):
         self.quant_conv = torch.nn.Conv2d(2 * embed_dim, mult * embed_dim, 1)
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, embed_dim, 1)
         self.embed_dim = embed_dim
+        self.do_normalization = do_normalization
+        self.latent_mean = latent_mean
+        self.latent_std = latent_std
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
 
@@ -570,15 +572,22 @@ class AutoencoderKL(nn.Module):
         print(f"Restored from {path}")
 
     def encode(self, x):
+        """Encode image to latent. If do_normalization, apply (z - mean) / std."""
         x = (x - self.mean) / self.std  # Normalize to [-1, 1]
         h = self.encoder(x)
         moments = self.quant_conv(h)
         if not self.use_variational:
             moments = torch.cat((moments, torch.ones_like(moments)), 1)
         posterior = DiagonalGaussianDistribution(moments)
-        return posterior
+        z = posterior.sample()
+        if self.do_normalization:
+            z = (z - self.latent_mean) / self.latent_std
+        return z
 
     def decode(self, z):
+        """Decode latent back to image. If do_normalization, denormalize first."""
+        if self.do_normalization:
+            z = z * self.latent_std + self.latent_mean
         z = self.post_quant_conv(z)
         dec = self.decoder(z)
         dec = dec * self.std + self.mean  # Denormalize back to [0, 1]

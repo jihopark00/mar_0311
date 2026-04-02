@@ -44,7 +44,10 @@ class MARSSL_Latent(nn.Module):
         sslenc_lora_rank = 8,
         sslenc_lora_alpha = 16,
         sslenc_learnable_mask_token = False,
-        
+        sslenc_use_repa=False,
+        sslenc_repa_loss_weight=0.0,
+        sslenc_repa_save_vram=False,
+
         sslenc_block_start = 0,
         sslenc_preenc_embed_dim = 1024,
         sslenc_preenc_depth = 0,
@@ -77,7 +80,7 @@ class MARSSL_Latent(nn.Module):
                  ):
         super().__init__()
 
-        sslenc = torch.hub.load('facebookresearch/dinov2', sslenc, pretrained=sslenc_pretrained) # TODO:check if it's weight is not init
+        _sslenc = torch.hub.load('facebookresearch/dinov2', sslenc, pretrained=sslenc_pretrained) # TODO:check if it's weight is not init
         # --------------------------------------------------------------------------
         # VAE and patchify specifics
         self.vae_embed_dim = vae_embed_dim
@@ -90,9 +93,13 @@ class MARSSL_Latent(nn.Module):
         self.token_embed_dim = vae_embed_dim * patch_size**2
         self.grad_checkpointing = grad_checkpointing
 
-        self.img_size_ssl = self.seq_h * sslenc.patch_size
+        self.sslenc_use_repa = sslenc_use_repa
+        self.sslenc_repa_loss_weight = sslenc_repa_loss_weight
+        self.sslenc_repa_save_vram = sslenc_repa_save_vram
 
-        encoder_embed_dim = sslenc.embed_dim
+        self.img_size_ssl = self.seq_h * _sslenc.patch_size
+
+        encoder_embed_dim = _sslenc.embed_dim
         self.encoder_embed_dim = encoder_embed_dim
         # reset sslenc blocks
         self.sslenc_block_start = sslenc_block_start
@@ -134,7 +141,7 @@ class MARSSL_Latent(nn.Module):
         #     Block(encoder_embed_dim, encoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
         #           proj_drop=proj_dropout, attn_drop=attn_dropout) for _ in range(encoder_depth)])
         # self.encoder_norm = norm_layer(encoder_embed_dim)
-        self.buffer_size = sslenc.num_register_tokens + 1 + sslenc_class_embed_num
+        self.buffer_size = _sslenc.num_register_tokens + 1 + sslenc_class_embed_num
         self.sslenc_class_embed_num = sslenc_class_embed_num
         self.sslenc_class_embed_start_layer = sslenc_class_embed_start_layer
         
@@ -164,7 +171,7 @@ class MARSSL_Latent(nn.Module):
         self.diffusion_batch_mul = diffusion_batch_mul
 
         # SSL Encoder
-        self.sslenc = sslenc
+        self.sslenc = _sslenc
 
         # apply lora / freeze, with full training for selected layers
         self.sslenc_lora_rank = sslenc_lora_rank
@@ -178,6 +185,17 @@ class MARSSL_Latent(nn.Module):
 
         if sslenc_learnable_mask_token:
             self.sslenc.mask_token.requires_grad = True
+
+        if self.sslenc_use_repa:
+            _sslenc_repa = torch.hub.load('facebookresearch/dinov2', sslenc, pretrained=True)
+            set_ssl_encoder_mode(_sslenc_repa, mode="freeze")
+            self.sslenc_repa = _sslenc_repa
+            # ImageNet normalization for DINOv2 (expects [0,1] input)
+            self.register_buffer('repa_pixel_mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+            self.register_buffer('repa_pixel_std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+            # self.sslenc_input_resize = (self.img_size_ssl, self.img_size_ssl)
+
+
 
     def initialize_weights(self):
         # parameters
@@ -355,7 +373,18 @@ class MARSSL_Latent(nn.Module):
         loss = self.diffloss(z=z, target=target, mask=mask)
         return loss
 
-    def forward(self, imgs, labels):
+    def forward(self, imgs, labels, imgs_pixel=None):
+        if self.sslenc_use_repa:
+            if self.sslenc_repa_save_vram:
+                self.sslenc_repa.to(imgs_pixel.device)
+            with torch.no_grad():
+                imgs_pixel_norm = (imgs_pixel - self.repa_pixel_mean) / self.repa_pixel_std
+                if self.img_size_ssl != imgs_pixel_norm.shape[-1]:
+                    imgs_pixel_norm = torch.nn.functional.interpolate(imgs_pixel_norm, size=(self.img_size_ssl, self.img_size_ssl), mode='bilinear', align_corners=False)
+                repa_feat = self.sslenc_repa.forward_features(imgs_pixel_norm)["x_prenorm"]
+                repa_feat = self.sslenc_repa.norm(repa_feat)  # B, 1+R+N, D (cls + register + patch)
+            if self.sslenc_repa_save_vram:
+                self.sslenc_repa.cpu()
 
         # class embed
         class_embedding = self.class_emb(labels).view(-1, self.sslenc_class_embed_num, self.encoder_embed_dim)
@@ -374,8 +403,16 @@ class MARSSL_Latent(nn.Module):
 
         # diffloss
         loss = self.forward_loss(z=z, target=gt_latents, mask=mask)
+        loss_log = {"diffloss": loss.item()}
+        if self.sslenc_use_repa and self.sslenc_repa_loss_weight > 0:
+            repa_loss = 1.0 - torch.nn.functional.cosine_similarity(x[:, self.sslenc_class_embed_num:, ], repa_feat, dim=-1)
+            repa_loss = repa_loss.mean()
+            loss = loss + repa_loss * self.sslenc_repa_loss_weight
+            loss_log["repa_loss"] = repa_loss.item()
 
-        return loss
+        loss_log["total_loss"] = loss.item()
+
+        return loss, loss_log
 
     def sample_tokens(self, bsz, num_iter=64, cfg=1.0, cfg_schedule="linear", labels=None, temperature=1.0, progress=False):
         grad_checkpointing = self.grad_checkpointing  # Enable grad checkpointing during sampling for memory efficiency

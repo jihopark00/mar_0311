@@ -1,8 +1,8 @@
 """
-Training engine for xAR Pixel models.
+Training engine for xAR models with configurable VAE.
 
-This module provides training and evaluation functions for xAR models
-operating in pixel space with PatchifyVAE.
+Based on engine_mar_latent.py. VAE handles all latent normalization
+internally (encode returns normalized z, decode accepts normalized z).
 """
 
 import math
@@ -51,7 +51,7 @@ def train_one_epoch(
 
     Args:
         model: The xAR model to train
-        vae: PatchifyVAE for encoding images
+        vae: Pretrained VAE with .encode(x) -> z and .decode(z) -> x
         model_params: List of model parameters
         ema_params: List of EMA parameters
         data_loader: Training data loader
@@ -84,14 +84,13 @@ def train_one_epoch(
         samples = samples.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
 
-        # Encode images with PatchifyVAE
+        # Encode images to normalized latent space
         with torch.no_grad():
-            posterior = vae.encode(samples)
-            x = posterior.sample()
+            x = vae.encode(samples)
 
         # Forward pass
         with torch.cuda.amp.autocast(dtype=args.amp_dtype):
-            loss, loss_log = model(x, labels)
+            loss, loss_log = model(x, labels, samples) # samples input for repa (optional)
 
         loss_value = loss.item()
 
@@ -160,7 +159,7 @@ def evaluate(
 
     Args:
         model_without_ddp: Model without DDP wrapper
-        vae: PatchifyVAE for decoding
+        vae: Pretrained VAE with .decode(z) -> x
         ema_params: EMA parameters
         args: Evaluation arguments
         epoch: Current epoch
@@ -200,10 +199,9 @@ def evaluate(
                 labels=labels_gen,
                 temperature=args.temperature,
             )
-            # Decode tokens to images
+            # Decode normalized latents to images via VAE
             sampled_images = vae.decode(sampled_tokens)
 
-    # Clamp to valid range
     sampled_images = sampled_images.detach().cpu().clamp(0, 1)
 
     if misc.get_rank() == 0:
@@ -256,14 +254,14 @@ def generate_samples(
         num_steps,
         cfg=1.0,
         amp_dtype=torch.bfloat16,
-        save_dir=None
+        save_dir=None,
 ):
     """
     Generate a batch of samples for evaluation.
 
     Args:
         model: The trained xAR model
-        vae: PatchifyVAE for decoding
+        vae: Pretrained VAE with .decode(z) -> x
         num_samples: Total number of samples to generate
         batch_size: Batch size for generation
         class_num: Number of classes

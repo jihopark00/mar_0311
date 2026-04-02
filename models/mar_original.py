@@ -256,8 +256,9 @@ class MAR_Original(nn.Module):
 
         # diffloss
         loss = self.forward_loss(z=z, target=gt_latents, mask=mask)
+        loss_log = {"loss": loss.item()}
 
-        return loss
+        return loss, loss_log
 
     def sample_tokens(self, bsz, num_iter=64, cfg=1.0, cfg_schedule="linear", labels=None, temperature=1.0, progress=False):
 
