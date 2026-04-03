@@ -318,7 +318,7 @@ def main(args):
         args.class_num = 10
     else:
         print(f"Dataset {args.dataset}. Using ImageFolder with path: {args.data_path}")
-        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path), transform=transform_train)
         args.class_num = 1000
 
     if args.debug_one_image:
