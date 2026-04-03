@@ -56,61 +56,79 @@ class CachedFolder(datasets.DatasetFolder):
         return moments, target
 
 
-class CachedLatentDataset(torch.utils.data.Dataset):
-    """Loads pre-cached VAE latents (.pt files) along with original images.
+class CachedLatentDataset(datasets.DatasetFolder):
+    """Loads cached VAE moments (.npz, from main_cache.py) along with
+    original images.
 
-    Expected directory structure:
+    Compatible with the cache format produced by ``main_cache.py``:
+
         cached_path/
-            metadata.json
-            latents/
-                0000000.pt  -> {'latent': tensor, 'latent_flip': tensor,
-                                'label': int, 'img_relpath': str}
-                ...
+          class_a/
+            img001.JPEG.npz   -> {'moments': ndarray, 'moments_flip': ndarray}
+            ...
+          class_b/
+            ...
 
-    Each .pt file stores the output of vae.encode() for both the original
-    and horizontally-flipped image, plus the relative path to the source
-    image so the original pixels can be loaded at training time (needed for
-    REPA and visualization).
+    Labels are inferred from the folder structure (same as ImageFolder).
+    Original images are loaded from ``data_path`` using the same relative
+    path (minus the ``.npz`` suffix).
+
+    At each access the dataset:
+      1. Randomly picks original or flipped moments (hflip augmentation).
+      2. Samples ``z`` from the diagonal‑Gaussian posterior encoded in the
+         moments, then normalises: ``(z - latent_mean) / latent_std``.
+      3. Loads the corresponding source image (with matching flip) so that
+         REPA or other pixel‑level losses remain usable.
 
     Args:
-        root: Path to cached latent directory.
-        data_path: Root directory of the original image dataset.
-                   Combined with img_relpath from each .pt file to load
-                   the source image.
-        transform: Transform applied to the original image (should NOT
-                   include RandomHorizontalFlip — flip is handled internally
-                   to stay consistent with the latent selection).
+        root: Directory of cached ``.npz`` files (same structure as an
+              ImageFolder, one sub‑dir per class).
+        data_path: Root of the original image dataset.  The relative path
+                   of each ``.npz`` file (with the ``.npz`` suffix removed)
+                   is joined with ``data_path`` to locate the source image.
+        transform: Transform for the source image.  Must **not** include
+                   ``RandomHorizontalFlip`` — flipping is handled internally
+                   to keep latent and image consistent.
+        latent_mean: Mean used for latent normalisation (default 0).
+        latent_std: Std used for latent normalisation (default 1).
     """
 
-    def __init__(self, root: str, data_path: str, transform=None):
+    def __init__(self, root: str, data_path: str, transform=None,
+                 latent_mean: float = 0.0, latent_std: float = 1.0):
+        super().__init__(root, loader=None, extensions=(".npz",))
         from PIL import Image
         self.Image = Image
-        latent_dir = os.path.join(root, 'latents')
-        self.files = sorted([
-            os.path.join(latent_dir, f)
-            for f in os.listdir(latent_dir)
-            if f.endswith('.pt')
-        ])
-        if len(self.files) == 0:
-            raise RuntimeError(f"No .pt files found in {latent_dir}")
         self.data_path = data_path
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.files)
+        self.img_transform = transform
+        self.latent_mean = latent_mean
+        self.latent_std = latent_std
 
     def __getitem__(self, index: int):
-        data = torch.load(self.files[index], map_location='cpu', weights_only=True)
-        flip = torch.rand(1).item() < 0.5
-        latent = data['latent_flip'] if flip else data['latent']
-        label = data['label']
+        path, target = self.samples[index]
 
-        # Load and transform original image
-        img_path = os.path.join(self.data_path, data['img_relpath'])
-        img = self.Image.open(img_path).convert('RGB')
-        if self.transform is not None:
-            img = self.transform(img)
+        # --- cached moments ---
+        data = np.load(path)
+        flip = torch.rand(1).item() < 0.5
+        moments = torch.from_numpy(
+            data['moments_flip'] if flip else data['moments']
+        ).float()
+
+        # Sample z from diagonal Gaussian, then normalise
+        mean, logvar = moments.chunk(2, dim=0)  # [C, H, W] each
+        logvar = logvar.clamp(-30.0, 20.0)
+        std = torch.exp(0.5 * logvar)
+        z = mean + std * torch.randn_like(mean)
+        z = (z - self.latent_mean) / self.latent_std
+
+        # --- original image ---
+        rel = os.path.relpath(path, self.root)          # class/img.JPEG.npz
+        img_rel = rel[: -len('.npz')]                    # class/img.JPEG
+        img = self.Image.open(
+            os.path.join(self.data_path, img_rel)
+        ).convert('RGB')
+        if self.img_transform is not None:
+            img = self.img_transform(img)
         if flip:
             img = img.flip(dims=[-1])
 
-        return latent, label, img
+        return z, target, img

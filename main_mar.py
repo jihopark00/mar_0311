@@ -290,15 +290,9 @@ def main(args):
     # ------------------------------------------------------------------
     if args.use_cached:
         # --- Cached VAE latents mode ---
-        import json
         from util.loader import CachedLatentDataset
 
-        meta_path = os.path.join(args.cached_path, 'metadata.json')
-        with open(meta_path) as f:
-            cache_meta = json.load(f)
-        args.class_num = cache_meta['class_num']
         print(f"Using cached latents from: {args.cached_path}")
-        print(f"Cache metadata: {cache_meta}")
 
         # Transform for original images (no hflip — handled by CachedLatentDataset)
         transform_cached = transforms.Compose([
@@ -310,7 +304,11 @@ def main(args):
             root=args.cached_path,
             data_path=args.data_path,
             transform=transform_cached,
+            latent_mean=vae_config.get('latent_mean', 0.0),
+            latent_std=vae_config.get('latent_std', 1.0),
         )
+        # class_num from number of class folders in cache
+        args.class_num = len(dataset_train.classes)
     else:
         # --- Standard image loading mode ---
         transform_train = transforms.Compose([

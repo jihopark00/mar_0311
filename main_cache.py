@@ -13,11 +13,13 @@ import torchvision.transforms as transforms
 import util.misc as misc
 from util.loader import ImageFolderWithFilename
 
-from models.vae import AutoencoderKL
-from engine_mar import cache_latents
+# from models.vae import AutoencoderKL
+from vae.vae import AutoencoderKL_original
+# from engine_mar_original import cache_latents
 
 from util.crop import center_crop_arr
 
+from typing import Iterable
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Cache VAE latents', add_help=False)
@@ -56,6 +58,35 @@ def get_args_parser():
     parser.add_argument('--cached_path', default='', help='path to cached latents')
 
     return parser
+
+
+def cache_latents(vae,
+                  data_loader: Iterable,
+                  device: torch.device,
+                  args=None):
+    metric_logger = misc.MetricLogger(delimiter="  ")
+    header = 'Caching: '
+    print_freq = 20
+
+    for data_iter_step, (samples, _, paths) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+
+        samples = samples.to(device, non_blocking=True)
+
+        with torch.no_grad():
+            posterior = vae.encode(samples)
+            moments = posterior.parameters
+            posterior_flip = vae.encode(samples.flip(dims=[3]))
+            moments_flip = posterior_flip.parameters
+
+        for i, path in enumerate(paths):
+            save_path = os.path.join(args.cached_path, path + '.npz')
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            np.savez(save_path, moments=moments[i].cpu().numpy(), moments_flip=moments_flip[i].cpu().numpy())
+
+        if misc.is_dist_avail_and_initialized():
+            torch.cuda.synchronize()
+
+    return
 
 
 def main(args):
@@ -101,7 +132,7 @@ def main(args):
     )
 
     # define the vae
-    vae = AutoencoderKL(embed_dim=args.vae_embed_dim, ch_mult=(1, 1, 2, 2, 4), ckpt_path=args.vae_path).cuda().eval()
+    vae = AutoencoderKL_original(embed_dim=args.vae_embed_dim, ch_mult=(1, 1, 2, 2, 4), ckpt_path=args.vae_path).cuda().eval()
 
     # training
     print(f"Start caching VAE latents")
