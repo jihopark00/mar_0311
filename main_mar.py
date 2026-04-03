@@ -431,12 +431,20 @@ def main(args):
     # ------------------------------------------------------------------
     # Save GT image grid + VAE reconstruction for visualization
     # ------------------------------------------------------------------
-    if global_rank == 0 and not args.use_cached:
+    if global_rank == 0:
         from torchvision.utils import save_image, make_grid
         sample_iter = iter(data_loader_train)
-        sample_images, sample_labels = next(sample_iter)
-        # Limit to eval_bsz
-        sample_images = sample_images[:args.eval_bsz]
+        sample_batch = next(sample_iter)
+
+        if args.use_cached:
+            # CachedLatentDataset returns (z, target, img)
+            sample_z, sample_labels, sample_images = sample_batch
+            sample_z = sample_z[:args.eval_bsz]
+            sample_images = sample_images[:args.eval_bsz]
+        else:
+            sample_images, sample_labels = sample_batch
+            sample_images = sample_images[:args.eval_bsz]
+
         nrow = min(8, sample_images.size(0))
 
         # GT grid
@@ -447,8 +455,11 @@ def main(args):
 
         # VAE reconstruction grid
         with torch.no_grad():
-            z = vae.encode(sample_images.cuda())
-            recon_images = vae.decode(z).cpu().clamp(0, 1)
+            if args.use_cached:
+                recon_images = vae.decode(sample_z.cuda()).cpu().clamp(0, 1)
+            else:
+                z = vae.encode(sample_images.cuda())
+                recon_images = vae.decode(z).cpu().clamp(0, 1)
         recon_grid = make_grid(recon_images, nrow=nrow, normalize=False, padding=2)
         recon_grid_path = os.path.join(run_dir, "vae_recon_images_grid.png")
         save_image(recon_grid, recon_grid_path)
