@@ -77,20 +77,31 @@ def train_one_epoch(
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    for data_iter_step, (samples, labels) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    use_cached = getattr(args, 'use_cached', False)
+
+    for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         # Per-iteration learning rate schedule
         lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
-        samples = samples.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        # Encode images to normalized latent space
-        with torch.no_grad():
-            x = vae.encode(samples)
+        if use_cached:
+            # batch = (cached_latent, label, img_pixel)
+            cached_latent, labels, img_pixel = batch
+            x = cached_latent.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            img_pixel = img_pixel.to(device, non_blocking=True)
+        else:
+            # batch = (image, label)
+            samples, labels = batch
+            samples = samples.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            img_pixel = samples
+            # Encode images to normalized latent space
+            with torch.no_grad():
+                x = vae.encode(samples)
 
         # Forward pass
         with torch.cuda.amp.autocast(dtype=args.amp_dtype):
-            loss, loss_log = model(x, labels, samples) # samples input for repa (optional)
+            loss, loss_log = model(x, labels, img_pixel) # img_pixel for repa (optional)
 
         loss_value = loss.item()
 

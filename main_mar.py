@@ -159,6 +159,12 @@ def get_args_parser():
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
 
+    # Cached latents
+    parser.add_argument('--use_cached', action='store_true',
+                        help='Use pre-cached VAE latents instead of encoding on-the-fly')
+    parser.add_argument('--cached_path', default='', type=str,
+                        help='Path to cached latent directory (created by main_cache.py)')
+
     # Wandb
     parser.add_argument('--wandb_key', default='', type=str)
     parser.add_argument('--wandb_entity', default='', type=str)
@@ -282,46 +288,71 @@ def main(args):
     # ------------------------------------------------------------------
     # Data loading
     # ------------------------------------------------------------------
-    transform_train = transforms.Compose([
-        transforms.Resize(args.img_size),
-        transforms.CenterCrop(args.img_size),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-    ])
+    if args.use_cached:
+        # --- Cached VAE latents mode ---
+        import json
+        from util.loader import CachedLatentDataset
 
-    if args.dataset == 'tiny-imagenet-hf':
-        dataset_train = HFImageDataset("zh-plus/tiny-imagenet", split="train", transform=transform_train)
-        args.class_num = 200
-    elif args.dataset == 'cifar10-hf':
-        dataset_train = HFImageDataset("uoft-cs/cifar10", split="train", transform=transform_train)
-        args.class_num = 10
-    elif args.dataset == 'mnist-hf':
+        meta_path = os.path.join(args.cached_path, 'metadata.json')
+        with open(meta_path) as f:
+            cache_meta = json.load(f)
+        args.class_num = cache_meta['class_num']
+        print(f"Using cached latents from: {args.cached_path}")
+        print(f"Cache metadata: {cache_meta}")
+
+        # Transform for original images (no hflip — handled by CachedLatentDataset)
+        transform_cached = transforms.Compose([
+            transforms.Resize(args.img_size),
+            transforms.CenterCrop(args.img_size),
+            transforms.ToTensor(),
+        ])
+        dataset_train = CachedLatentDataset(
+            root=args.cached_path,
+            data_path=args.data_path,
+            transform=transform_cached,
+        )
+    else:
+        # --- Standard image loading mode ---
         transform_train = transforms.Compose([
             transforms.Resize(args.img_size),
             transforms.CenterCrop(args.img_size),
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
         ])
-        dataset_train = HFImageDataset("ylecun/mnist", split="train", transform=transform_train)
-        args.class_num = 10
-    elif args.dataset == 'cifar10':
-        dataset_train = datasets.CIFAR10(root=args.data_path, train=True, download=True, transform=transform_train)
-        args.class_num = 10
-    elif args.dataset == 'mnist':
-        # MNIST is grayscale, convert to RGB
-        transform_mnist = transforms.Compose([
-            transforms.Resize(args.img_size),
-            transforms.CenterCrop(args.img_size),
-            transforms.Grayscale(num_output_channels=3),
-            transforms.ToTensor(),
-        ])
-        dataset_train = datasets.MNIST(root=args.data_path, train=True, download=True, transform=transform_mnist)
-        args.class_num = 10
-    else:
-        print(f"Dataset {args.dataset}. Using ImageFolder with path: {args.data_path}")
-        dataset_train = datasets.ImageFolder(os.path.join(args.data_path), transform=transform_train)
-        args.class_num = 1000
 
-    if args.debug_one_image:
+        if args.dataset == 'tiny-imagenet-hf':
+            dataset_train = HFImageDataset("zh-plus/tiny-imagenet", split="train", transform=transform_train)
+            args.class_num = 200
+        elif args.dataset == 'cifar10-hf':
+            dataset_train = HFImageDataset("uoft-cs/cifar10", split="train", transform=transform_train)
+            args.class_num = 10
+        elif args.dataset == 'mnist-hf':
+            transform_train = transforms.Compose([
+                transforms.Resize(args.img_size),
+                transforms.CenterCrop(args.img_size),
+                transforms.ToTensor(),
+            ])
+            dataset_train = HFImageDataset("ylecun/mnist", split="train", transform=transform_train)
+            args.class_num = 10
+        elif args.dataset == 'cifar10':
+            dataset_train = datasets.CIFAR10(root=args.data_path, train=True, download=True, transform=transform_train)
+            args.class_num = 10
+        elif args.dataset == 'mnist':
+            # MNIST is grayscale, convert to RGB
+            transform_mnist = transforms.Compose([
+                transforms.Resize(args.img_size),
+                transforms.CenterCrop(args.img_size),
+                transforms.Grayscale(num_output_channels=3),
+                transforms.ToTensor(),
+            ])
+            dataset_train = datasets.MNIST(root=args.data_path, train=True, download=True, transform=transform_mnist)
+            args.class_num = 10
+        else:
+            print(f"Dataset {args.dataset}. Using ImageFolder with path: {args.data_path}")
+            dataset_train = datasets.ImageFolder(os.path.join(args.data_path), transform=transform_train)
+            args.class_num = 1000
+
+    if args.debug_one_image and not args.use_cached:
         args.batch_size = 32
         args.lr = 1e-4
         model_config['grad_checkpointing'] = False
@@ -402,7 +433,7 @@ def main(args):
     # ------------------------------------------------------------------
     # Save GT image grid + VAE reconstruction for visualization
     # ------------------------------------------------------------------
-    if global_rank == 0:
+    if global_rank == 0 and not args.use_cached:
         from torchvision.utils import save_image, make_grid
         sample_iter = iter(data_loader_train)
         sample_images, sample_labels = next(sample_iter)
