@@ -26,7 +26,7 @@ class MAR(nn.Module):
     def __init__(self, img_size=256, vae_stride=16, patch_size=1,
                  encoder_embed_dim=1024, encoder_depth=16, encoder_num_heads=16,
                  decoder_embed_dim=1024, decoder_depth=16, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm,
+                 mlp_ratio=4., norm_layer=partial(nn.LayerNorm, eps=1e-6),
                  vae_embed_dim=16,
                  mask_ratio_min=0.7,
                  label_drop_prob=0.1,

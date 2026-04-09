@@ -40,6 +40,7 @@ class MARSSL_Latent(nn.Module):
         sslenc_pretrained=True,
         sslenc_class_embed_num = 32,
         sslenc_class_embed_start_layer = 10,
+        sslenc_class_embed_per_token = True,
 
         sslenc_tuning_mode = "lora", # "freeze" | "full" | "lora"
         sslenc_full_train_layer_list = [],
@@ -122,7 +123,11 @@ class MARSSL_Latent(nn.Module):
         # --------------------------------------------------------------------------
         # Class Embedding
         self.num_classes = class_num
-        self.class_emb = nn.Embedding(class_num, sslenc_class_embed_num * encoder_embed_dim)
+        self.sslenc_class_embed_per_token = sslenc_class_embed_per_token
+        if sslenc_class_embed_per_token:
+            self.class_emb = nn.Embedding(class_num, sslenc_class_embed_num * encoder_embed_dim)
+        else:
+            self.class_emb = nn.Embedding(class_num, encoder_embed_dim)
         self.label_drop_prob = label_drop_prob
         # Fake class embedding for CFG's unconditional generation
         self.fake_latent = nn.Parameter(torch.zeros(1, encoder_embed_dim))
@@ -397,7 +402,10 @@ class MARSSL_Latent(nn.Module):
                 self.sslenc_repa.cpu()
 
         # class embed
-        class_embedding = self.class_emb(labels).view(-1, self.sslenc_class_embed_num, self.encoder_embed_dim)
+        if self.sslenc_class_embed_per_token:
+            class_embedding = self.class_emb(labels).view(-1, self.sslenc_class_embed_num, self.encoder_embed_dim)
+        else:
+            class_embedding = self.class_emb(labels).unsqueeze(1).expand(-1, self.sslenc_class_embed_num, -1)
         
         # patchify and mask (drop) tokens
         x = self.patchify(imgs)
@@ -444,7 +452,10 @@ class MARSSL_Latent(nn.Module):
 
             # class embedding and CFG
             if labels is not None:
-                class_embedding = self.class_emb(labels).view(-1, self.sslenc_class_embed_num, self.encoder_embed_dim)
+                if self.sslenc_class_embed_per_token:
+                    class_embedding = self.class_emb(labels).view(-1, self.sslenc_class_embed_num, self.encoder_embed_dim)
+                else:
+                    class_embedding = self.class_emb(labels).unsqueeze(1).expand(-1, self.sslenc_class_embed_num, -1)
             else:
                 class_embedding = self.fake_latent.unsqueeze(0).expand(bsz, self.sslenc_class_embed_num, -1)
             if not cfg == 1.0:
