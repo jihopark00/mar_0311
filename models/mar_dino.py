@@ -39,6 +39,7 @@ class MAR_DINO(nn.Module):
                  num_sampling_steps='100',
                  diffusion_batch_mul=4,
                  grad_checkpointing=False,
+                 diffloss_grad_checkpointing=None,
                  dinov2_name='dinov2_vitb14_reg',
                  dinov2_repo_path='facebookresearch/dinov2',
                  dinov2_pretrained=True,
@@ -131,13 +132,19 @@ class MAR_DINO(nn.Module):
 
         # --------------------------------------------------------------------------
         # Diffusion Loss
+        # diffloss_grad_checkpointing defaults to grad_checkpointing when unset,
+        # so existing configs behave identically. Pass it explicitly to control
+        # diffloss checkpointing independently (e.g. enable only on the main
+        # backbone while keeping the diffloss MLP uncheckpointed).
+        if diffloss_grad_checkpointing is None:
+            diffloss_grad_checkpointing = grad_checkpointing
         self.diffloss = DiffLoss(
             target_channels=self.token_embed_dim,
             z_channels=decoder_embed_dim,
             width=diffloss_w,
             depth=diffloss_d,
             num_sampling_steps=num_sampling_steps,
-            grad_checkpointing=grad_checkpointing
+            grad_checkpointing=diffloss_grad_checkpointing,
         )
         self.diffusion_batch_mul = diffusion_batch_mul
 
@@ -434,7 +441,7 @@ class MAR_DINO(nn.Module):
         x = x[(1-mask_with_buffer).nonzero(as_tuple=True)].reshape(bsz, -1, embed_dim)
 
         # apply Transformer blocks (empty loop when encoder_depth=0)
-        if self.grad_checkpointing and not torch.jit.is_scripting():
+        if self.grad_checkpointing and self.training and not torch.jit.is_scripting():
             for block in self.encoder_blocks:
                 x = checkpoint(block, x)
         else:
@@ -494,7 +501,7 @@ class MAR_DINO(nn.Module):
 
         # 5. Dinov2 transformer blocks (optional grad checkpointing),
         #    followed by dinov2's own final norm (matches forward_features).
-        if self.grad_checkpointing and not torch.jit.is_scripting():
+        if self.grad_checkpointing and self.training and not torch.jit.is_scripting():
             for blk in self.dinov2_backbone.blocks:
                 x = checkpoint(blk, x)
         else:
@@ -510,7 +517,7 @@ class MAR_DINO(nn.Module):
         x = self.decoder_embed(x)  # (bsz, buf+1+R+L, decoder_embed_dim)
         x = x + self.decoder_pos_embed_learned
 
-        if self.grad_checkpointing and not torch.jit.is_scripting():
+        if self.grad_checkpointing and self.training and not torch.jit.is_scripting():
             for blk in self.decoder_blocks:
                 x = checkpoint(blk, x)
         else:
