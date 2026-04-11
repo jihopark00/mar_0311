@@ -535,7 +535,10 @@ class MAR_DINO(nn.Module):
         target = target.reshape(bsz * seq_len, -1).repeat(self.diffusion_batch_mul, 1)
         z = z.reshape(bsz*seq_len, -1).repeat(self.diffusion_batch_mul, 1)
         mask = mask.reshape(bsz*seq_len).repeat(self.diffusion_batch_mul)
-        loss = self.diffloss(z=z, target=target, mask=mask)
+        # Run DiffLoss in fp32: IDDPM's normal_kl / discretized_gaussian_log_likelihood
+        # overflow in bf16 (exp of learned logvar), producing NaN.
+        with torch.cuda.amp.autocast(enabled=False):
+            loss = self.diffloss(z=z.float(), target=target.float(), mask=mask.float())
         return loss
 
     def forward(self, x, labels, imgs_pixel=None):
