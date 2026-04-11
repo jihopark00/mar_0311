@@ -247,8 +247,8 @@ def init_distributed_mode(args):
 class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
-    def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
+    def __init__(self, enabled=True):
+        self._scaler = torch.cuda.amp.GradScaler(enabled=enabled)
 
     def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
         self._scaler.scale(loss).backward(create_graph=create_graph)
