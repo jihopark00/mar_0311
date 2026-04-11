@@ -67,7 +67,12 @@ first, change the forward output format: return loss, log_dict
         
     
 
-# Decoder layer num selection abl
+# cache dinov2 forward_features
+reference: main_cache.py
+write: main_cache_dinov2.py
 
-instead of mar, use Dino encoder, 
-
+want to save imagenet dino feature with pretrained dinov2_vitg14_reg.
+- save just naive feature seq, token length = class token num + register token num + image token num
+- should be dataset code friendly like the reference.
+- use torch.hub.load to load dinov2
+- normalize carefullly

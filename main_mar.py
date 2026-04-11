@@ -139,6 +139,11 @@ def get_args_parser():
     parser.add_argument('--warmup_epochs', type=int, default=100, metavar='N')
     parser.add_argument('--ema_rate', default=0.9999, type=float)
     parser.add_argument('--grad_clip', type=float, default=3.0)
+    parser.add_argument('--warmup_param_prefixes', nargs='*', default=[],
+                        help='Parameter name prefixes that should receive LR '
+                             'warmup (e.g. "dinov2_backbone"). Non-matching '
+                             'params start at full LR from step 0. Empty list '
+                             '(default) means all params are warmed up.')
 
     parser.add_argument('--run_name', default="exp1", type=str)
     parser.add_argument('--output_dir', default='./output_dir')
@@ -502,7 +507,11 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
-    param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
+    param_groups = misc.build_param_groups_with_warmup_filter(
+        model_without_ddp,
+        weight_decay=args.weight_decay,
+        warmup_param_prefixes=getattr(args, 'warmup_param_prefixes', []),
+    )
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
 

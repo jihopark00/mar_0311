@@ -1,102 +1,50 @@
 import math
+
 import torch
-from torch import nn
-import torch.nn.functional as F
+import torch.nn as nn
 
-def set_requires_grad(module: nn.Module, flag: bool):
-    for p in module.parameters():
-        p.requires_grad = flag
-
-def iter_named_trainable_params(module: nn.Module):
-    for n, p in module.named_parameters():
-        if p.requires_grad:
-            yield n, p
-
-def set_ssl_encoder_mode(model, mode: str,
-                             lora_r: int = 8, lora_alpha: int = 16, lora_dropout: float = 0.0,
-                             lora_targets=("qkv", "proj", "fc1", "fc2"),
-                             full_train_layer_list=None):
-    """
-    mode: "freeze" | "full" | "lora"
-    full_train_layer_list: list of block indices to fully unfreeze (skipping LoRA for those blocks)
-    """
-    mode = mode.lower()
-    if mode not in {"freeze", "full", "lora"}:
-        raise ValueError(f"Unknown mode: {mode}")
-    full_train_layer_list = set(full_train_layer_list or [])
-
-    if mode == "freeze":
-        set_requires_grad(model, False)
-
-    elif mode == "full":
-        set_requires_grad(model, True)
-
-    elif mode == "lora":
-        # freeze encoder
-        set_requires_grad(model, False)
-        # inject LoRA into selected Linear layers, skipping full-train blocks
-        skip_modules = {model.blocks[i] for i in full_train_layer_list} if hasattr(model, 'blocks') else set()
-        apply_lora_to_vit(model, target_linear_names=lora_targets,
-                            r=lora_r, alpha=lora_alpha, dropout=lora_dropout,
-                            skip_modules=skip_modules)
-
-        # ensure LoRA params are trainable (base weights remain frozen)
-        for n, p in model.named_parameters():
-            if "lora_A" in n or "lora_B" in n:
-                p.requires_grad = True
-
-    # fully unfreeze selected layers
-    if full_train_layer_list:
-        for layer_idx in full_train_layer_list:
-            set_requires_grad(model.blocks[layer_idx], True)
-                
-def apply_lora_to_vit(module: nn.Module, target_linear_names=("qkv", "proj", "fc1", "fc2"),
-                      r=8, alpha=16, dropout=0.0, skip_modules=None):
-    """
-    Replaces selected nn.Linear layers with LoRALinear in-place.
-    skip_modules: set of modules to skip (no LoRA injection).
-    """
-    skip_modules = skip_modules or set()
-    for name, child in list(module.named_children()):
-        if child in skip_modules:
-            continue
-        # recurse first
-        apply_lora_to_vit(child, target_linear_names, r, alpha, dropout, skip_modules)
-
-        # then replace if this is a target Linear
-        if isinstance(child, nn.Linear) and any(t in name for t in target_linear_names):
-            setattr(module, name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
 
 class LoRALinear(nn.Module):
+    """Wraps a frozen nn.Linear with a trainable low-rank update.
+
+    forward(x) = base(x) + (alpha / rank) * (dropout(x) @ A^T) @ B^T
+    where A is (rank, in_features), B is (out_features, rank).
+    Base weight and bias are frozen; only lora_A and lora_B train.
+    lora_B is initialized to zero so the wrapped layer initially matches base(x).
     """
-    Drop-in replacement for nn.Linear with LoRA.
-    W is frozen; LoRA learns A,B such that: y = xW^T + alpha/r * x(B A)^T
-    """
-    def __init__(self, base: nn.Linear, r: int = 8, alpha: float = 16.0, dropout: float = 0.0):
+
+    def __init__(self, base: nn.Linear, rank: int, alpha: float, dropout: float = 0.0):
         super().__init__()
-        assert isinstance(base, nn.Linear)
+        assert rank > 0, "LoRA rank must be positive"
         self.base = base
-        self.base.weight.requires_grad = False
-        if self.base.bias is not None:
-            self.base.bias.requires_grad = False
+        self.rank = rank
+        self.alpha = float(alpha)
+        self.scaling = self.alpha / rank
 
-        self.r = r
-        self.alpha = alpha
-        self.scaling = alpha / r
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        for p in self.base.parameters():
+            p.requires_grad_(False)
 
-        in_f = base.in_features
-        out_f = base.out_features
+        self.lora_A = nn.Parameter(torch.empty(rank, base.in_features))
+        self.lora_B = nn.Parameter(torch.zeros(base.out_features, rank))
+        self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        # LoRA params
-        self.lora_A = nn.Parameter(torch.zeros(r, in_f))
-        self.lora_B = nn.Parameter(torch.zeros(out_f, r))
-
-        # init: A ~ Kaiming, B = 0 (common LoRA init)
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-        nn.init.zeros_(self.lora_B)
 
-    def forward(self, x):
-        y = self.base(x)
-        lora = (self.dropout(x) @ self.lora_A.t()) @ self.lora_B.t()
-        return y + self.scaling * lora
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_out = self.base(x)
+        lora_out = self.lora_dropout(x) @ self.lora_A.t() @ self.lora_B.t()
+        return base_out + self.scaling * lora_out
+
+
+def wrap_linear_with_lora(parent: nn.Module, dotted_name: str,
+                          rank: int, alpha: float, dropout: float = 0.0) -> None:
+    """In-place replace `parent.<dotted_name>` (an nn.Linear) with LoRALinear."""
+    parts = dotted_name.split(".")
+    obj = parent
+    for p in parts[:-1]:
+        obj = getattr(obj, p)
+    leaf = parts[-1]
+    base = getattr(obj, leaf)
+    if not isinstance(base, nn.Linear):
+        raise TypeError(f"{dotted_name} is {type(base).__name__}, expected nn.Linear")
+    setattr(obj, leaf, LoRALinear(base, rank, alpha, dropout))

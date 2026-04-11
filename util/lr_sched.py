@@ -2,20 +2,27 @@ import math
 
 
 def adjust_learning_rate(optimizer, epoch, args):
-    """Decay the learning rate with half-cycle cosine after warmup"""
-    if epoch < args.warmup_epochs:
-        lr = args.lr * epoch / args.warmup_epochs 
-    else:
-        if args.lr_schedule == "constant":
+    """Per-group warmup with constant/cosine schedule after warmup.
+
+    Each param group may override ``warmup_epochs`` (falls back to
+    ``args.warmup_epochs``). ``lr_scale`` is a multiplicative factor applied
+    after scheduling. Groups with ``warmup_epochs=0`` start at full LR
+    immediately.
+    """
+    last_lr = None
+    for param_group in optimizer.param_groups:
+        warmup = param_group.get("warmup_epochs", args.warmup_epochs)
+        if epoch < warmup:
+            lr = args.lr * epoch / max(1, warmup)
+        elif args.lr_schedule == "constant":
             lr = args.lr
         elif args.lr_schedule == "cosine":
-            lr = args.min_lr + (args.lr - args.min_lr) * 0.5 * \
-                (1. + math.cos(math.pi * (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)))
+            lr = args.min_lr + (args.lr - args.min_lr) * 0.5 * (
+                1. + math.cos(math.pi * (epoch - warmup) / max(1, args.epochs - warmup))
+            )
         else:
             raise NotImplementedError
-    for param_group in optimizer.param_groups:
-        if "lr_scale" in param_group:
-            param_group["lr"] = lr * param_group["lr_scale"]
-        else:
-            param_group["lr"] = lr
-    return lr
+        scale = param_group.get("lr_scale", 1.0)
+        param_group["lr"] = lr * scale
+        last_lr = param_group["lr"]
+    return last_lr

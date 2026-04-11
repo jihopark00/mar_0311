@@ -303,6 +303,78 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
         {'params': decay, 'weight_decay': weight_decay}]
 
 
+def build_param_groups_with_warmup_filter(model, weight_decay=1e-5,
+                                          warmup_param_prefixes=(), skip_list=()):
+    """Split trainable params into 4 groups along two axes:
+
+    1. Warmup target: a param is a "warmup target" if its fully-qualified name
+       starts with any prefix in ``warmup_param_prefixes``. Warmup-target
+       groups inherit ``args.warmup_epochs`` from the global schedule.
+       Non-target groups set ``warmup_epochs=0`` so they start at full LR
+       immediately.
+    2. Weight decay: no_decay for ndim==1, bias, entries in ``skip_list``,
+       or names containing ``diffloss`` (same rule as ``add_weight_decay``).
+
+    If ``warmup_param_prefixes`` is empty, **all** params are warmup targets
+    (backward-compatible with ``add_weight_decay``).
+
+    Returns a list of AdamW-compatible param group dicts.
+    """
+    prefixes = tuple(warmup_param_prefixes or ())
+    warmup_all = (len(prefixes) == 0)
+
+    buckets = {
+        ("wu",    "decay"):   [],
+        ("wu",    "nodecay"): [],
+        ("no_wu", "decay"):   [],
+        ("no_wu", "nodecay"): [],
+    }
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        no_wd = (
+            len(param.shape) == 1
+            or name.endswith(".bias")
+            or name in skip_list
+            or "diffloss" in name
+        )
+        is_wu = warmup_all or any(name.startswith(p) for p in prefixes)
+        key = (("wu" if is_wu else "no_wu"), ("nodecay" if no_wd else "decay"))
+        buckets[key].append(param)
+
+    groups = []
+    # Warmup-target groups: inherit args.warmup_epochs (no override)
+    if buckets[("wu", "decay")]:
+        groups.append({"params": buckets[("wu", "decay")],
+                       "weight_decay": weight_decay})
+    if buckets[("wu", "nodecay")]:
+        groups.append({"params": buckets[("wu", "nodecay")],
+                       "weight_decay": 0.0})
+    # Non-target groups: explicit warmup_epochs=0 (full LR from step 0)
+    if buckets[("no_wu", "decay")]:
+        groups.append({"params": buckets[("no_wu", "decay")],
+                       "weight_decay": weight_decay,
+                       "warmup_epochs": 0})
+    if buckets[("no_wu", "nodecay")]:
+        groups.append({"params": buckets[("no_wu", "nodecay")],
+                       "weight_decay": 0.0,
+                       "warmup_epochs": 0})
+
+    def _numel(ps): return sum(p.numel() for p in ps)
+    print(f"[param groups] warmup_param_prefixes={list(prefixes)}")
+    print(f"  warmup    decay   : {len(buckets[('wu','decay')]):4d} tensors, "
+          f"{_numel(buckets[('wu','decay')])/1e6:8.2f}M params")
+    print(f"  warmup    no_decay: {len(buckets[('wu','nodecay')]):4d} tensors, "
+          f"{_numel(buckets[('wu','nodecay')])/1e6:8.2f}M params")
+    print(f"  no-warmup decay   : {len(buckets[('no_wu','decay')]):4d} tensors, "
+          f"{_numel(buckets[('no_wu','decay')])/1e6:8.2f}M params")
+    print(f"  no-warmup no_decay: {len(buckets[('no_wu','nodecay')]):4d} tensors, "
+          f"{_numel(buckets[('no_wu','nodecay')])/1e6:8.2f}M params")
+
+    return groups
+
+
 def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, ema_params=None, epoch_name=None):
     if epoch_name is None:
         epoch_name = str(epoch)
