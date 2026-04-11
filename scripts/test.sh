@@ -4,7 +4,7 @@
 
 exps_dir="./ho_mar_0311"
 run_names=(0409_mar-base_dec-only) # "0405_marssllatent-base_imgnet") #  "0403_mar-base_imgnet-cache"
-train_steps=( 20 40 60 )
+train_steps=( 80 100)
 
 for run_name in "${run_names[@]}"; do
     for train_step in "${train_steps[@]}"; do

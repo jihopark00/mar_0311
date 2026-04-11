@@ -67,4 +67,7 @@ first, change the forward output format: return loss, log_dict
         
     
 
-# Dec layer selection abl
+# Decoder layer num selection abl
+
+instead of mar, use Dino encoder, 
+

@@ -1,3 +1,5 @@
+from functools import partial
+
 import numpy as np
 from tqdm import tqdm
 import scipy.stats as stats
@@ -24,7 +26,7 @@ class MAR_DINO(nn.Module):
     def __init__(self, img_size=256, vae_stride=16, patch_size=1,
                  encoder_embed_dim=1024, encoder_depth=0, encoder_num_heads=16,
                  decoder_embed_dim=1024, decoder_depth=16, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm,
+                 mlp_ratio=4., norm_layer=partial(nn.LayerNorm, eps=1e-6),
                  vae_embed_dim=16,
                  mask_ratio_min=0.7,
                  label_drop_prob=0.1,
@@ -68,6 +70,8 @@ class MAR_DINO(nn.Module):
         # Dinov2 backbone (loaded from local repo via torch.hub).
         # We reuse its transformer blocks + cls/register/mask/pos_embed, but NOT
         # its patch_embed — MAR feeds VAE-latent tokens in directly.
+        self.dinov2_name = dinov2_name
+        self.dinov2_pretrained = dinov2_pretrained
         self.dinov2_backbone = torch.hub.load(
             dinov2_repo_path, dinov2_name, pretrained=dinov2_pretrained,
         )
@@ -155,29 +159,29 @@ class MAR_DINO(nn.Module):
 
         if use_repa:
             repa_name = dinov2_repa_name or dinov2_name
-            self.dinov2_repa = torch.hub.load(
-                dinov2_repo_path, repa_name, pretrained=dinov2_pretrained,
+            dinov2_repa = torch.hub.load(
+                dinov2_repo_path, repa_name, pretrained=True,
             )
-            for p in self.dinov2_repa.parameters():
+            for p in dinov2_repa.parameters():
                 p.requires_grad_(False)
-            self.dinov2_repa.eval()
+            dinov2_repa.eval()
 
-            if self.dinov2_repa.embed_dim != self.dino_embed_dim:
+            if dinov2_repa.embed_dim != self.dino_embed_dim:
                 raise ValueError(
                     f"REPA dim mismatch: dinov2_repa.embed_dim="
-                    f"{self.dinov2_repa.embed_dim} vs dino_embed_dim="
+                    f"{dinov2_repa.embed_dim} vs dino_embed_dim="
                     f"{self.dino_embed_dim}. Use the same variant or add a projector."
                 )
 
             if repa_input_size is None:
-                repa_input_size = self.seq_w * self.dinov2_repa.patch_size
+                repa_input_size = self.seq_w * dinov2_repa.patch_size
             self.repa_input_size = int(repa_input_size)
 
-            repa_patches = (self.repa_input_size // self.dinov2_repa.patch_size) ** 2
+            repa_patches = (self.repa_input_size // dinov2_repa.patch_size) ** 2
             if repa_patches != self.seq_len:
                 raise ValueError(
                     f"REPA patch count mismatch: {repa_patches} (from "
-                    f"{self.repa_input_size}/{self.dinov2_repa.patch_size}) vs "
+                    f"{self.repa_input_size}/{dinov2_repa.patch_size}) vs "
                     f"seq_len={self.seq_len}. Pick repa_input_size = seq_w * "
                     f"dinov2_repa.patch_size, or use a different dinov2_repa."
                 )
@@ -190,14 +194,24 @@ class MAR_DINO(nn.Module):
                 "repa_std",
                 torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1),
             )
-
+            self.dinov2_repa_bank = (dinov2_repa, )
             if repa_save_vram:
-                self.dinov2_repa.cpu()
+                dinov2_repa.cpu()
 
     def train(self, mode=True):
         super().train(mode)
         if getattr(self, "use_repa", False):
-            self.dinov2_repa.eval()
+            self.dinov2_repa_bank[0].eval()
+        return self
+
+    def _apply(self, fn, *args, **kwargs):
+        # dinov2_repa_bank holds a tuple-wrapped submodule that is hidden from
+        # nn.Module's parameter/state_dict tracking. Forward _apply manually so
+        # model.to(device) / .cuda() / .cpu() / .float() / etc. propagate to it.
+        super()._apply(fn, *args, **kwargs)
+        bank = self.__dict__.get('dinov2_repa_bank', None)
+        if bank is not None:
+            bank[0]._apply(fn, *args, **kwargs)
         return self
 
     def _apply_dino_tuning(self, freeze_dino=None, freeze_dino_blocks=None,
@@ -340,6 +354,8 @@ class MAR_DINO(nn.Module):
             self.class_emb,
         ]:
             module.apply(self._init_weights)
+        if not self.dinov2_pretrained:
+            self.dinov2_backbone.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -521,11 +537,12 @@ class MAR_DINO(nn.Module):
         # 1. Pre-compute REPA target features from raw pixels.
         repa_feat_gt = None
         if self.use_repa and self.training:
+            dinov2_repa = self.dinov2_repa_bank[0]
             if imgs_pixel is None:
                 raise ValueError("use_repa=True requires `imgs_pixel`")
-            device = next(self.parameters()).device
+            device = imgs_pixel.device
             if self.repa_save_vram:
-                self.dinov2_repa.to(device)
+                dinov2_repa.to(device)
             with torch.no_grad():
                 pix = (imgs_pixel - self.repa_mean) / self.repa_std
                 if (pix.shape[-1] != self.repa_input_size
@@ -537,12 +554,12 @@ class MAR_DINO(nn.Module):
                         antialias=True,
                         align_corners=False,
                     )
-                t = self.dinov2_repa.prepare_tokens_with_masks(pix)
-                for blk in self.dinov2_repa.blocks:
+                t = dinov2_repa.prepare_tokens_with_masks(pix)
+                for blk in dinov2_repa.blocks:
                     t = blk(t)
-                repa_feat_gt = self.dinov2_repa.norm(t)  # (bsz, 1+R+L, D)
+                repa_feat_gt = dinov2_repa.norm(t)  # (bsz, 1+R+L, D)
             if self.repa_save_vram:
-                self.dinov2_repa.cpu()
+                dinov2_repa.cpu()
 
         # 2. Standard MAR forward (forward_mae_decoder may populate repa_feat_pred).
         self.repa_feat_pred = None  # safety: clear stale state
