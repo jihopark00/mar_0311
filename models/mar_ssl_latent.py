@@ -47,6 +47,9 @@ class MARSSL_Latent(nn.Module):
         sslenc_lora_rank = 8,
         sslenc_lora_alpha = 16,
         sslenc_learnable_mask_token = False,
+        sslenc_learnable_pos_embed = False,
+        sslenc_learnable_cls_token = False,
+        sslenc_learnable_register_tokens = False,
 
         sslenc_use_repa=False,
         sslenc_repa_loss_weight=0.0,
@@ -200,6 +203,23 @@ class MARSSL_Latent(nn.Module):
             self.sslenc.mask_token.requires_grad = True
         else:
             self.sslenc.mask_token.requires_grad = False
+
+        if sslenc_learnable_pos_embed:
+            self.sslenc.pos_embed.requires_grad = True
+        else:
+            self.sslenc.pos_embed.requires_grad = False
+
+        if sslenc_learnable_cls_token:
+            self.sslenc.cls_token.requires_grad = True
+        else:
+            self.sslenc.cls_token.requires_grad = False
+
+        if sslenc_learnable_register_tokens:
+            if self.sslenc.register_tokens is not None:
+                self.sslenc.register_tokens.requires_grad = True
+        else:
+            if self.sslenc.register_tokens is not None:
+                self.sslenc.register_tokens.requires_grad = False
 
         if self.sslenc_use_repa:
             _sslenc_repa = torch.hub.load('facebookresearch/dinov2', sslenc, pretrained=True)

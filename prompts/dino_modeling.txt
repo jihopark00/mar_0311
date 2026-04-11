@@ -1,0 +1,70 @@
+repo: /home/ljeadec31/opt/ssl2gen-top/mar_o 
+reference dino repo: /home/ljeadec31/opt/ssl2gen-top/dinov2
+do not refer to other dirs
+
+write mar_dino.py MAR_DINO: 
+- incorporate the transformer blocks of the dinov2 model to mar.py 
+- load dinov2 with transformers library (there is also option to use torch.hub.load(...), think which would be better and decide)
+- method: encoder -> dinov2 blocks -> decoder
+    - dinov2 blocks process should be inside the forward_mae_decoder 
+    - becareful that we are not using the dinov2's patch_emb    
+    0. encoder: 
+        - should support depth=0
+    1. forward_mae_decoder:
+        - linear layer to match dino's embed_dim (dino_embed)
+        - split the buffer class tokens and the image tokens.
+        - use dinov2's mask_token, instead of the mar mask_token (remove if not needed)
+        1-1. cls/register token part (refer to dinov2's prepare_tokens_with_masks)
+            - concat the dinov2's cls token
+            - apply dinov2's positional encoding
+            - concat register tokens
+            - concat the buffer class tokens (previously splitted)
+            - pass dinov2 blocks (support gradient-checkpointing)
+        1-2. mar decoder: 
+            - becareful that the token number of "decoder_pos_embed_learned" should include the cls and register tokens of dinov2
+
+- freeze(requires_grad) control will be addressed later 
+
+
+
+## dino tuning option
+- freeze_dino  = [ "norm", "cls_token", "register_tokens", "mask_token"]
+- freeze_dino_blocks = [0,1,]
+- lora_dino_blocks = [5,6,7,8,9,10,11]
+- lora_config = {rank: , alpha:}
+
+
+first, change the forward output format: return loss, log_dict
+## repa option
+- def forward(self, imgs, labels) -> forward(self, x, labels, imgs_pixel=None):
+    -optional imgs_pixel: raw pixel values
+    - x is usually latent
+
+- repa
+    args:
+        - use_repa = false
+        - repa_loss_weight
+        - repa_save_vram
+    init
+        - if use_repa: load another pretrained dino (dinov2_repa)
+        - should be in the model's attribute, but should not be affected by model.train() or model.eval() (think which method would be best)
+        - save repa_mean and repa_std as buffer for normalization
+
+    forward_mae_decoder:
+    - if use_repa: save self.repa_feat_pred (dict, list, or just directly? which would be better?)
+    forward
+        if use_repa (at first)
+        - if repa_save_vram: cpu -> device
+        - normalize imgs_pixel w/ repa_mean, repa_std
+        - resize imgs_pixel to dino input resolution, if required
+        - forward pretrained dino (dinov2_repa) => repa_feat_gt (including cls, reg tokens)
+        - if repa_save_vram: device -> cpu
+        if use_repa  (at last)
+        - repa_loss = 1.0 - cosin sim (repa_feat_pred, repa_feat_gt)
+        - loss = loss + repa_loss * self.repa_loss_weight
+        - clear self.repa_feat_pred
+        - log to log_dict
+        
+    
+
+# Dec layer selection abl

@@ -46,7 +46,7 @@ def set_ssl_encoder_mode(model, mode: str,
                 p.requires_grad = True
 
     # fully unfreeze selected layers
-    if hasattr(model, 'blocks') and full_train_layer_list:
+    if full_train_layer_list:
         for layer_idx in full_train_layer_list:
             set_requires_grad(model.blocks[layer_idx], True)
                 

@@ -1,0 +1,24 @@
+repo: /home/ljeadec31/opt/ssl2gen-top/mar_0311
+
+goal: write eval.py to evaluate FID and IS score
+input args for eval.py:
+- exps_dir
+- run_name
+- train_step (to load corresponding checkpoint)
+
+reference files:
+- train: main_mar.py, engine_mar.py (don't refer to other files)
+- - refer to the model defining part
+- eval: refer to engine_mar_original.py
+- model: models/mar.py
+
+support option: 
+- saving sample path
+- saving npz or not (for ADM eval https://github.com/openai/guided-diffusion/tree/main/evaluations)
+- saving results in csv (given csv file name)
+- - create file if not exist
+- - lock the file while writing the values to prevent conflict,
+- - log run_name train_step fid is
+
+
+At final, write scripts/test.sh (refer scripts/train_mar.sh)
