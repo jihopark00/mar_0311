@@ -127,11 +127,15 @@ def train_one_epoch(
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
 
+        # Global iteration step across all epochs.
+        train_step = epoch * len(data_loader) + data_iter_step
+
         # Logging
         if log_writer is not None:
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('lr', lr, epoch_1000x)
+            log_writer.add_scalar('train_step', train_step, epoch_1000x)
             for key, value in loss_log.items():
                 log_writer.add_scalar(f'train_{key}', value, epoch_1000x)
 
@@ -142,6 +146,7 @@ def train_one_epoch(
                 'lr': lr,
                 'epoch': epoch,
                 'step': epoch_1000x,
+                'train_step': train_step,
             }
             for key, value in loss_log.items():
                 wandb_log[f'train_{key}'] = value
