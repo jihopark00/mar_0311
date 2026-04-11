@@ -212,7 +212,7 @@ def main(args):
     _float_keys = {'lr', 'blr', 'min_lr', 'weight_decay', 'ema_rate', 'grad_clip'}
     for key, value in training_cfg.items():
         if hasattr(args, key):
-            if key in _float_keys:
+            if key in _float_keys and value is not None:
                 value = float(value)
             setattr(args, key, value)
 
