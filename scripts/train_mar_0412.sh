@@ -8,12 +8,12 @@ wandb_project="ssl2gen"
 wandb_entity="qkrwlgh0314"
 
 # Dataset options: cifar10-hf, tiny-imagenet-hf, mnist-hf, imagenet
-run_name="0412_mardino-giant"
+run_name="0412_mardino-base_enc12_repa"
 exps_dir="./ho_mar_0311"
 config=$exps_dir/$run_name/config.yaml
 
 # ongoing: high-resolution good? 
-torchrun --nnodes=1 --nproc_per_node=1 --master_port=41222 main_mar.py \
+torchrun --nnodes=1 --nproc_per_node=4 --master_port=41222 main_mar.py \
     --config "$config" \
     --dtype "bf16" \
     --num_workers 8 \

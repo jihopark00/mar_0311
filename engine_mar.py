@@ -84,24 +84,28 @@ def train_one_epoch(
         lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
         if use_cached:
-            # batch = (cached_latent, label, img_pixel)
-            cached_latent, labels, img_pixel = batch
+            # batch = (cached_latent, label, img_pixel) or (cached_latent, label, img_pixel, feat)
+            cached_latent, labels, img_pixel = batch[0], batch[1], batch[2]
+            feat = batch[3] if len(batch) == 4 else None
             x = cached_latent.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             img_pixel = img_pixel.to(device, non_blocking=True)
+            if feat is not None:
+                feat = feat.to(device, non_blocking=True)
         else:
             # batch = (image, label)
             samples, labels = batch
             samples = samples.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-            img_pixel = samples
+            img_pixel = None
+            feat = None
             # Encode images to normalized latent space
             with torch.no_grad():
                 x = vae.encode(samples)
 
         # Forward pass
         with torch.cuda.amp.autocast(dtype=args.amp_dtype):
-            loss, loss_log = model(x, labels, img_pixel) # img_pixel for repa (optional)
+            loss, loss_log = model(x, labels, img_pixel, feat) # img_pixel for repa (optional)
 
         loss_value = loss.item()
 

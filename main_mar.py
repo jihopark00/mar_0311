@@ -169,6 +169,8 @@ def get_args_parser():
                         help='Use pre-cached VAE latents instead of encoding on-the-fly')
     parser.add_argument('--cached_path', default='', type=str,
                         help='Path to cached latent directory (created by main_cache.py)')
+    parser.add_argument('--feat_cached_root', default=None, type=str,
+                        help='Path to extra cached feature directory (optional)')
 
     # Wandb
     parser.add_argument('--wandb_key', default='', type=str)
@@ -305,12 +307,15 @@ def main(args):
             transforms.CenterCrop(args.img_size),
             transforms.ToTensor(),
         ])
+        _feat_cached_root = args.feat_cached_root if args.feat_cached_root else None
+
         dataset_train = CachedLatentDataset(
             root=args.cached_path,
             data_path=args.data_path,
             transform=transform_cached,
             latent_mean=vae_config.get('latent_mean', 0.0),
             latent_std=vae_config.get('latent_std', 1.0),
+            feat_cached_root=_feat_cached_root,
         )
         # class_num from number of class folders in cache
         args.class_num = len(dataset_train.classes)
@@ -442,8 +447,8 @@ def main(args):
         sample_batch = next(sample_iter)
 
         if args.use_cached:
-            # CachedLatentDataset returns (z, target, img)
-            sample_z, sample_labels, sample_images = sample_batch
+            # CachedLatentDataset returns (z, target, img) or (z, target, img, feat)
+            sample_z, sample_labels, sample_images = sample_batch[0], sample_batch[1], sample_batch[2]
             sample_z = sample_z[:args.eval_bsz]
             sample_images = sample_images[:args.eval_bsz]
         else:
@@ -482,6 +487,8 @@ def main(args):
     # Model
     # ------------------------------------------------------------------
     model_config['class_num'] = args.class_num
+    if args.use_cached and args.feat_cached_root:
+        model_config['use_repa_cached_feat'] = True
     model = models_mar.__dict__[model_name](**model_config)
 
     print("Model = %s" % str(model))
@@ -511,6 +518,7 @@ def main(args):
         model_without_ddp,
         weight_decay=args.weight_decay,
         warmup_param_prefixes=getattr(args, 'warmup_param_prefixes', []),
+        exclude_warmup_param_prefixes=getattr(args, 'exclude_warmup_param_prefixes', []),
     )
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)

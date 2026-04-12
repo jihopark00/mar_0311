@@ -94,7 +94,8 @@ class CachedLatentDataset(datasets.DatasetFolder):
     """
 
     def __init__(self, root: str, data_path: str, transform=None,
-                 latent_mean: float = 0.0, latent_std: float = 1.0):
+                 latent_mean: float = 0.0, latent_std: float = 1.0,
+                 feat_cached_root=None):
         super().__init__(root, loader=None, extensions=(".npz",))
         from PIL import Image
         self.Image = Image
@@ -102,9 +103,11 @@ class CachedLatentDataset(datasets.DatasetFolder):
         self.img_transform = transform
         self.latent_mean = latent_mean
         self.latent_std = latent_std
+        self.feat_cached_root = feat_cached_root
 
     def __getitem__(self, index: int):
         path, target = self.samples[index]
+        rel = os.path.relpath(path, self.root)          # class/img.JPEG.npz
 
         # --- cached moments ---
         data = np.load(path)
@@ -121,7 +124,6 @@ class CachedLatentDataset(datasets.DatasetFolder):
         z = (z - self.latent_mean) / self.latent_std
 
         # --- original image ---
-        rel = os.path.relpath(path, self.root)          # class/img.JPEG.npz
         img_rel = rel[: -len('.npz')]                    # class/img.JPEG
         img = self.Image.open(
             os.path.join(self.data_path, img_rel)
@@ -130,5 +132,13 @@ class CachedLatentDataset(datasets.DatasetFolder):
             img = self.img_transform(img)
         if flip:
             img = img.flip(dims=[-1])
+
+        # --- extra cached features (optional) ---
+        if self.feat_cached_root is not None:
+            feat_data = np.load(os.path.join(self.feat_cached_root, rel))
+            feat = torch.from_numpy(
+                feat_data['feat_flip'] if flip else feat_data['feat']
+            ).float()
+            return z, target, img, feat
 
         return z, target, img

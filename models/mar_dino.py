@@ -12,6 +12,7 @@ from torch.utils.checkpoint import checkpoint
 from timm.models.vision_transformer import Block
 
 from models.diffloss import DiffLoss
+from models.flowloss import FlowLoss
 
 
 def mask_by_order(mask_len, order, bsz, seq_len):
@@ -34,12 +35,15 @@ class MAR_DINO(nn.Module):
                  attn_dropout=0.1,
                  proj_dropout=0.1,
                  buffer_size=64,
-                 diffloss_d=3,
-                 diffloss_w=1024,
-                 num_sampling_steps='100',
                  diffusion_batch_mul=4,
                  grad_checkpointing=False,
-                 diffloss_grad_checkpointing=None,
+                 diffloss_class="DiffLoss",
+                 diffloss_kwargs={
+                     "width": 1024,
+                     "depth": 3,
+                     "num_sampling_steps": '100',
+                     "grad_checkpointing": False,
+                 },
                  dinov2_name='dinov2_vitb14_reg',
                  dinov2_repo_path='facebookresearch/dinov2',
                  dinov2_pretrained=True,
@@ -48,6 +52,7 @@ class MAR_DINO(nn.Module):
                  lora_dino_blocks=[],
                  lora_config=None,
                  use_repa=False,
+                 use_repa_cached_feat=False,
                  repa_loss_weight=0.5,
                  repa_save_vram=False,
                  dinov2_repa_name=None,
@@ -76,6 +81,10 @@ class MAR_DINO(nn.Module):
         self.dinov2_backbone = torch.hub.load(
             dinov2_repo_path, dinov2_name, pretrained=dinov2_pretrained,
         )
+        for blk in self.dinov2_backbone.blocks:
+            blk.attn.attn_drop = attn_dropout
+            blk.attn.proj_drop = nn.Dropout(proj_dropout)
+            blk.mlp.drop = nn.Dropout(proj_dropout)
         dino_embed_dim = self.dinov2_backbone.embed_dim
         num_register = self.dinov2_backbone.num_register_tokens
         self.dino_embed_dim = dino_embed_dim
@@ -97,9 +106,12 @@ class MAR_DINO(nn.Module):
         # --------------------------------------------------------------------------
         # MAR encoder specifics
         self.z_proj = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True)
-        self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
         self.buffer_size = buffer_size
-        self.encoder_pos_embed_learned = nn.Parameter(torch.zeros(1, self.seq_len + self.buffer_size, encoder_embed_dim))
+        self.encoder_depth = encoder_depth
+
+        if encoder_depth > 0:
+            self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
+            self.encoder_pos_embed_learned = nn.Parameter(torch.zeros(1, self.seq_len + self.buffer_size, encoder_embed_dim))
 
         self.encoder_blocks = nn.ModuleList([
             Block(encoder_embed_dim, encoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
@@ -112,14 +124,22 @@ class MAR_DINO(nn.Module):
         self.dino_embed = nn.Linear(encoder_embed_dim, dino_embed_dim, bias=True)
 
         # --------------------------------------------------------------------------
+        # Positional embedding for buffer tokens in the dino block stage.
+        # Without this, buffer tokens enter dinov2 blocks with no positional info.
+        self.buffer_dino_pos_embed = nn.Parameter(torch.zeros(1, self.buffer_size, dino_embed_dim))
+
+        # --------------------------------------------------------------------------
         # MAR decoder specifics. The dinov2 blocks run at dino_embed_dim; the MAR
         # decoder blocks run at decoder_embed_dim (independent). decoder_embed
         # projects from dino_embed_dim to decoder_embed_dim after the dinov2 blocks.
         self.decoder_embed = nn.Linear(dino_embed_dim, decoder_embed_dim, bias=True)
-        # pos embed covers: [buffer | dino_cls | dino_registers | image_tokens]
-        self.decoder_pos_embed_learned = nn.Parameter(
-            torch.zeros(1, self.buffer_size + 1 + num_register + self.seq_len, decoder_embed_dim)
-        )
+        self.decoder_depth = decoder_depth
+
+        if decoder_depth > 0:
+            # pos embed covers: [buffer | dino_cls | dino_registers | image_tokens]
+            self.decoder_pos_embed_learned = nn.Parameter(
+                torch.zeros(1, self.buffer_size + 1 + num_register + self.seq_len, decoder_embed_dim)
+            )
 
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
@@ -132,20 +152,12 @@ class MAR_DINO(nn.Module):
 
         # --------------------------------------------------------------------------
         # Diffusion Loss
-        # diffloss_grad_checkpointing defaults to grad_checkpointing when unset,
-        # so existing configs behave identically. Pass it explicitly to control
-        # diffloss checkpointing independently (e.g. enable only on the main
-        # backbone while keeping the diffloss MLP uncheckpointed).
-        if diffloss_grad_checkpointing is None:
-            diffloss_grad_checkpointing = grad_checkpointing
-        self.diffloss = DiffLoss(
-            target_channels=self.token_embed_dim,
-            z_channels=decoder_embed_dim,
-            width=diffloss_w,
-            depth=diffloss_d,
-            num_sampling_steps=num_sampling_steps,
-            grad_checkpointing=diffloss_grad_checkpointing,
-        )
+        diffloss_kwargs.update({
+            "target_channels": self.token_embed_dim,
+            "z_channels": decoder_embed_dim,
+        })
+        diffloss_class = eval(diffloss_class)
+        self.diffloss = diffloss_class(**diffloss_kwargs)
         self.diffusion_batch_mul = diffusion_batch_mul
 
         # Apply PEFT-style tuning controls to the dinov2 backbone.
@@ -157,14 +169,16 @@ class MAR_DINO(nn.Module):
         )
 
         # --------------------------------------------------------------------------
-        # REPA: Representation Alignment with a separate frozen dinov2 on raw pixels.
+        # REPA: Representation Alignment with a separate frozen dinov2 on raw pixels,
+        # or with pre-cached features (use_repa_cached_feat=True).
         self.use_repa = use_repa
+        self.use_repa_cached_feat = use_repa_cached_feat
         self.repa_loss_weight = float(repa_loss_weight)
         self.repa_save_vram = repa_save_vram
         # populated by forward_mae_decoder when training+use_repa, cleared in forward()
         self.repa_feat_pred = None
 
-        if use_repa:
+        if use_repa and not use_repa_cached_feat:
             repa_name = dinov2_repa_name or dinov2_name
             dinov2_repa = torch.hub.load(
                 dinov2_repo_path, repa_name, pretrained=True,
@@ -207,7 +221,7 @@ class MAR_DINO(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        if getattr(self, "use_repa", False):
+        if getattr(self, "use_repa", False) and not getattr(self, "use_repa_cached_feat", False):
             self.dinov2_repa_bank[0].eval()
         return self
 
@@ -296,9 +310,11 @@ class MAR_DINO(nn.Module):
         """Print a per-component summary of trainable vs total parameters."""
         groups = {
             "dinov2_backbone": self.dinov2_backbone,
-            "mar_encoder": nn.ModuleList([
-                self.z_proj, self.z_proj_ln, self.encoder_blocks, self.encoder_norm,
-            ]),
+            "mar_encoder": nn.ModuleList(
+                [self.z_proj, self.z_proj_ln, self.encoder_blocks, self.encoder_norm]
+                if self.encoder_depth > 0 else
+                [self.z_proj, self.encoder_blocks, self.encoder_norm]
+            ),
             "dino_embed (proj)": self.dino_embed,
             "mar_decoder": nn.ModuleList([
                 self.decoder_embed, self.decoder_blocks, self.decoder_norm,
@@ -347,19 +363,25 @@ class MAR_DINO(nn.Module):
         # parameters
         torch.nn.init.normal_(self.class_emb.weight, std=.02)
         torch.nn.init.normal_(self.fake_latent, std=.02)
-        torch.nn.init.normal_(self.encoder_pos_embed_learned, std=.02)
-        torch.nn.init.normal_(self.decoder_pos_embed_learned, std=.02)
+        if self.encoder_depth > 0:
+            torch.nn.init.normal_(self.encoder_pos_embed_learned, std=.02)
+        torch.nn.init.normal_(self.buffer_dino_pos_embed, std=.02)
+        if self.decoder_depth > 0:
+            torch.nn.init.normal_(self.decoder_pos_embed_learned, std=.02)
         torch.nn.init.normal_(self.diffusion_pos_embed_learned, std=.02)
 
         # initialize nn.Linear and nn.LayerNorm for modules we own.
         # Skip the dinov2 backbone so its pretrained weights are not overwritten.
-        for module in [
-            self.z_proj, self.z_proj_ln,
+        modules_to_init = [
+            self.z_proj,
             self.encoder_blocks, self.encoder_norm,
             self.dino_embed,
             self.decoder_embed, self.decoder_blocks, self.decoder_norm,
             self.class_emb,
-        ]:
+        ]
+        if self.encoder_depth > 0:
+            modules_to_init.append(self.z_proj_ln)
+        for module in modules_to_init:
             module.apply(self._init_weights)
         if not self.dinov2_pretrained:
             self.dinov2_backbone.apply(self._init_weights)
@@ -433,20 +455,22 @@ class MAR_DINO(nn.Module):
 
         x[:, :self.buffer_size] = class_embedding.unsqueeze(1)
 
-        # encoder position embedding
-        x = x + self.encoder_pos_embed_learned
-        x = self.z_proj_ln(x)
+        if self.encoder_depth > 0:
+            # encoder position embedding
+            x = x + self.encoder_pos_embed_learned
+            x = self.z_proj_ln(x)
 
         # dropping
         x = x[(1-mask_with_buffer).nonzero(as_tuple=True)].reshape(bsz, -1, embed_dim)
 
-        # apply Transformer blocks (empty loop when encoder_depth=0)
-        if self.grad_checkpointing and self.training and not torch.jit.is_scripting():
-            for block in self.encoder_blocks:
-                x = checkpoint(block, x)
-        else:
-            for block in self.encoder_blocks:
-                x = block(x)
+        if self.encoder_depth > 0:
+            # apply Transformer blocks
+            if self.grad_checkpointing and self.training and not torch.jit.is_scripting():
+                for block in self.encoder_blocks:
+                    x = checkpoint(block, x)
+            else:
+                for block in self.encoder_blocks:
+                    x = block(x)
         x = self.encoder_norm(x)
 
         return x
@@ -496,6 +520,9 @@ class MAR_DINO(nn.Module):
                 (image_tokens[:, :1], reg, image_tokens[:, 1:]), dim=1
             )  # (bsz, 1+R+L, Dd)
 
+        # Add positional embedding to buffer tokens before dino blocks.
+        buffer_tokens = buffer_tokens + self.buffer_dino_pos_embed
+
         # Prepend MAR buffer tokens to match mar.py's buffer-at-front layout.
         x = torch.cat((buffer_tokens, image_tokens), dim=1)  # (bsz, buf+1+R+L, Dd)
 
@@ -515,14 +542,16 @@ class MAR_DINO(nn.Module):
 
         # 6. Project dino_embed_dim -> decoder_embed_dim, then MAR decoder blocks.
         x = self.decoder_embed(x)  # (bsz, buf+1+R+L, decoder_embed_dim)
-        x = x + self.decoder_pos_embed_learned
 
-        if self.grad_checkpointing and self.training and not torch.jit.is_scripting():
-            for blk in self.decoder_blocks:
-                x = checkpoint(blk, x)
-        else:
-            for blk in self.decoder_blocks:
-                x = blk(x)
+        if self.decoder_depth > 0:
+            x = x + self.decoder_pos_embed_learned
+
+            if self.grad_checkpointing and self.training and not torch.jit.is_scripting():
+                for blk in self.decoder_blocks:
+                    x = checkpoint(blk, x)
+            else:
+                for blk in self.decoder_blocks:
+                    x = blk(x)
         x = self.decoder_norm(x)
 
         # 7. Strip buffer + cls + register → only image tokens fed to diffloss.
@@ -535,41 +564,47 @@ class MAR_DINO(nn.Module):
         target = target.reshape(bsz * seq_len, -1).repeat(self.diffusion_batch_mul, 1)
         z = z.reshape(bsz*seq_len, -1).repeat(self.diffusion_batch_mul, 1)
         mask = mask.reshape(bsz*seq_len).repeat(self.diffusion_batch_mul)
-        # Run DiffLoss in fp32: IDDPM's normal_kl / discretized_gaussian_log_likelihood
-        # overflow in bf16 (exp of learned logvar), producing NaN.
-        with torch.cuda.amp.autocast(enabled=False):
-            loss = self.diffloss(z=z.float(), target=target.float(), mask=mask.float())
+        loss = self.diffloss(z=z, target=target, mask=mask)
+        # # Run DiffLoss in fp32: IDDPM's normal_kl / discretized_gaussian_log_likelihood
+        # # overflow in bf16 (exp of learned logvar), producing NaN.
+        # with torch.cuda.amp.autocast(enabled=False):
+        #     loss = self.diffloss(z=z.float(), target=target.float(), mask=mask.float())
         return loss
 
-    def forward(self, x, labels, imgs_pixel=None):
+    def forward(self, x, labels, imgs_pixel=None, feat=None):
         log_dict = {}
 
-        # 1. Pre-compute REPA target features from raw pixels.
+        # 1. Pre-compute REPA target features.
         repa_feat_gt = None
         if self.use_repa and self.training:
-            dinov2_repa = self.dinov2_repa_bank[0]
-            if imgs_pixel is None:
-                raise ValueError("use_repa=True requires `imgs_pixel`")
-            device = imgs_pixel.device
-            if self.repa_save_vram:
-                dinov2_repa.to(device)
-            with torch.no_grad():
-                pix = (imgs_pixel - self.repa_mean) / self.repa_std
-                if (pix.shape[-1] != self.repa_input_size
-                        or pix.shape[-2] != self.repa_input_size):
-                    pix = F.interpolate(
-                        pix,
-                        size=(self.repa_input_size, self.repa_input_size),
-                        mode="bicubic",
-                        antialias=True,
-                        align_corners=False,
-                    )
-                t = dinov2_repa.prepare_tokens_with_masks(pix)
-                for blk in dinov2_repa.blocks:
-                    t = blk(t)
-                repa_feat_gt = dinov2_repa.norm(t)  # (bsz, 1+R+L, D)
-            if self.repa_save_vram:
-                dinov2_repa.cpu()
+            if self.use_repa_cached_feat:
+                if feat is None:
+                    raise ValueError("use_repa_cached_feat=True requires `feat`")
+                repa_feat_gt = feat
+            else:
+                dinov2_repa = self.dinov2_repa_bank[0]
+                if imgs_pixel is None:
+                    raise ValueError("use_repa=True requires `imgs_pixel`")
+                device = imgs_pixel.device
+                if self.repa_save_vram:
+                    dinov2_repa.to(device)
+                with torch.no_grad():
+                    pix = (imgs_pixel - self.repa_mean) / self.repa_std
+                    if (pix.shape[-1] != self.repa_input_size
+                            or pix.shape[-2] != self.repa_input_size):
+                        pix = F.interpolate(
+                            pix,
+                            size=(self.repa_input_size, self.repa_input_size),
+                            mode="bicubic",
+                            antialias=True,
+                            align_corners=False,
+                        )
+                    t = dinov2_repa.prepare_tokens_with_masks(pix)
+                    for blk in dinov2_repa.blocks:
+                        t = blk(t)
+                    repa_feat_gt = dinov2_repa.norm(t)  # (bsz, 1+R+L, D)
+                if self.repa_save_vram:
+                    dinov2_repa.cpu()
 
         # 2. Standard MAR forward (forward_mae_decoder may populate repa_feat_pred).
         self.repa_feat_pred = None  # safety: clear stale state
