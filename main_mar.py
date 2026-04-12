@@ -525,8 +525,10 @@ def main(args):
 
     # Mixed precision setup
     _dtype_map = {'fp32': torch.float32, 'fp16': torch.float16, 'bf16': torch.bfloat16}
-    args.amp_dtype = _dtype_map[args.dtype]
-    loss_scaler = NativeScaler(enabled=(args.dtype == 'fp16'))
+    precision = training_cfg.get('precision', args.dtype)
+    args.amp_dtype = _dtype_map[precision]
+    args.precision_warmup_epochs = int(training_cfg.get('precision_warmup_epochs', 0))
+    loss_scaler = NativeScaler(enabled=(precision == 'fp16'))
 
     # ------------------------------------------------------------------
     # Resume from checkpoint

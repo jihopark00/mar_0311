@@ -103,8 +103,10 @@ def train_one_epoch(
             with torch.no_grad():
                 x = vae.encode(samples)
 
-        # Forward pass
-        with torch.cuda.amp.autocast(dtype=args.amp_dtype):
+        # Forward pass (fp32 during precision warmup, then configured dtype)
+        precision_warmup = getattr(args, 'precision_warmup_epochs', 0)
+        amp_dtype = torch.float32 if epoch < precision_warmup else args.amp_dtype
+        with torch.cuda.amp.autocast(dtype=amp_dtype):
             loss, loss_log = model(x, labels, img_pixel, feat) # img_pixel for repa (optional)
 
         loss_value = loss.item()

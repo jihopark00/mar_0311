@@ -8,7 +8,7 @@ wandb_project="ssl2gen"
 wandb_entity="qkrwlgh0314"
 
 # Dataset options: cifar10-hf, tiny-imagenet-hf, mnist-hf, imagenet
-run_name="0412_mardino-giant" # 0412_mardino-base
+run_name="0412_mardino-base" # "0412_mardino-giant" # 0412_mardino-base
 exps_dir="./ho_mar_0311"
 config=$exps_dir/$run_name/config.yaml
 
@@ -29,7 +29,7 @@ torchrun --nnodes=1 --nproc_per_node=4 --master_port=11121 main_mar.py \
     --resume_last \
     --use_cached \
     --cached_path /scratch2/ljeadec31/imagenet_mar_sdvae \
-    --feat_cached_root /scratch2/ljeadec31/imagenet_dinov2_vitg14_reg \
+    # --feat_cached_root /scratch2/ljeadec31/imagenet_dinov2_vitg14_reg \
     # --wandb_key "${wandb_key}" \
     # --wandb_project "${wandb_project}" \
     # --wandb_entity "${wandb_entity}" \
