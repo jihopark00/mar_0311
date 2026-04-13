@@ -177,6 +177,16 @@ class MAR_DINO(nn.Module):
         self.repa_save_vram = repa_save_vram
         # populated by forward_mae_decoder when training+use_repa, cleared in forward()
         self.repa_feat_pred = None
+        
+        if use_repa:
+            self.register_buffer(
+                "repa_mean",
+                torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1),
+            )
+            self.register_buffer(
+                "repa_std",
+                torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1),
+            )
 
         if use_repa and not use_repa_cached_feat:
             repa_name = dinov2_repa_name or dinov2_name
@@ -207,14 +217,6 @@ class MAR_DINO(nn.Module):
                     f"dinov2_repa.patch_size, or use a different dinov2_repa."
                 )
 
-            self.register_buffer(
-                "repa_mean",
-                torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1),
-            )
-            self.register_buffer(
-                "repa_std",
-                torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1),
-            )
             self.dinov2_repa_bank = (dinov2_repa, )
             if repa_save_vram:
                 dinov2_repa.cpu()
