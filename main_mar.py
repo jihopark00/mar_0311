@@ -182,8 +182,6 @@ def get_args_parser():
     parser.add_argument('--local_rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://')
-    parser.add_argument('--bucket_cap_mb', default=25, type=int,
-                        help='DDP bucket cap size in MB (default: 25)')
 
     return parser
 
@@ -513,13 +511,7 @@ def main(args):
     print("effective batch size: %d" % eff_batch_size)
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, 
-            device_ids=[args.gpu],
-            bucket_cap_mb=args.bucket_cap_mb,
-            gradient_as_bucket_view=True,
-            find_unused_parameters=False,
-        )
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
     param_groups = misc.build_param_groups_with_warmup_filter(
