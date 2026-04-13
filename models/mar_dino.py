@@ -653,7 +653,7 @@ class MAR_DINO(nn.Module):
         z = self.forward_mae_decoder(x_enc, mask)
         diff_loss = self.forward_loss(z=z, target=gt_latents, mask=mask)
 
-        log_dict["diff_loss"] = diff_loss.item()
+        log_dict["diff_loss"] = diff_loss.detach().item()
         loss = diff_loss
 
         # 3. Add REPA loss.
@@ -671,10 +671,10 @@ class MAR_DINO(nn.Module):
                 )
             repa_loss = (1.0 - F.cosine_similarity(pred, repa_feat_gt, dim=-1)).mean()
             loss = loss + self.repa_loss_weight * repa_loss
-            log_dict["repa_loss"] = repa_loss.item()
+            log_dict["repa_loss"] = repa_loss.detach().item()
             self.repa_feat_pred = None
 
-        log_dict["loss"] = loss.item()
+        log_dict["loss"] = loss.detach().item()
         return loss, log_dict
 
     def sample_tokens(self, bsz, num_iter=64, cfg=1.0, cfg_schedule="linear", labels=None, temperature=1.0, progress=False):
