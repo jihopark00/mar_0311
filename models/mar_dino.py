@@ -327,9 +327,10 @@ class MAR_DINO(nn.Module):
         def attn_forward_fp32(self_attn, x):
             B, N, C = x.shape
             orig_dtype = x.dtype
-            qkv = self_attn.qkv(x)
+            # qkv = self_attn.qkv(x)
             with torch.cuda.amp.autocast(enabled=False):
-                qkv = qkv.float()
+                qkv = self_attn.qkv(x.float())
+                # qkv = qkv.float()
                 q, k, v = qkv.reshape(B, N, 3, self_attn.num_heads, C // self_attn.num_heads).unbind(2)
                 q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
                 out = F.scaled_dot_product_attention(
