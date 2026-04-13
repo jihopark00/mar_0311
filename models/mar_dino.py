@@ -47,6 +47,7 @@ class MAR_DINO(nn.Module):
                  dinov2_name='dinov2_vitb14_reg',
                  dinov2_repo_path='facebookresearch/dinov2',
                  dinov2_pretrained=True,
+                 dino_attn_fp32=False,
                  freeze_dino=['norm', 'cls_token', 'register_tokens', 'mask_token', 'pos_embed'],
                  freeze_dino_blocks=[],
                  lora_dino_blocks=[],
@@ -167,6 +168,9 @@ class MAR_DINO(nn.Module):
             lora_dino_blocks=lora_dino_blocks,
             lora_config=lora_config,
         )
+
+        if dino_attn_fp32:
+            self._dino_attn_fp32()
 
         # --------------------------------------------------------------------------
         # REPA: Representation Alignment with a separate frozen dinov2 on raw pixels,
@@ -307,6 +311,36 @@ class MAR_DINO(nn.Module):
                 blk = self.dinov2_backbone.blocks[idx]
                 for tgt in target_modules:
                     wrap_linear_with_lora(blk, tgt, rank, alpha, dropout)
+
+    def _dino_attn_fp32(self):
+        """Monkey-patch each DINOv2 attention block to run QKV + SDPA in fp32.
+
+        DINOv2 ViT-g (40 blocks, LayerScale gammas up to ±10 in later blocks)
+        produces NaN gradients during bf16 backward: SDPA backward is numerically
+        unstable for the concentrated attention patterns these pretrained weights
+        produce on OOD (VAE-latent) inputs.  Running only the attention matmul in
+        fp32 fixes this with minimal extra memory (no need to keep the full
+        [B, N, D] activation stream in fp32 for all 40 blocks).
+        """
+        import types
+
+        def attn_forward_fp32(self_attn, x):
+            B, N, C = x.shape
+            orig_dtype = x.dtype
+            qkv = self_attn.qkv(x)
+            with torch.cuda.amp.autocast(enabled=False):
+                qkv = qkv.float()
+                q, k, v = qkv.reshape(B, N, 3, self_attn.num_heads, C // self_attn.num_heads).unbind(2)
+                q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+                out = F.scaled_dot_product_attention(
+                    q, k, v,
+                    dropout_p=self_attn.attn_drop if self_attn.training else 0.0,
+                )
+                out = out.transpose(1, 2).contiguous().view(B, N, C).to(orig_dtype)
+            return self_attn.proj_drop(self_attn.proj(out))
+
+        for blk in self.dinov2_backbone.blocks:
+            blk.attn.forward = types.MethodType(attn_forward_fp32, blk.attn)
 
     def print_trainable_parameters(self):
         """Print a per-component summary of trainable vs total parameters."""
