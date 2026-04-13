@@ -151,6 +151,8 @@ def get_args_parser():
     parser.add_argument('--dtype', default='bf16', type=str, choices=['fp32', 'fp16', 'bf16'],
                         help='Training precision. bf16: no loss scaler needed; fp16: uses GradScaler.')
     parser.add_argument('--seed', default=1, type=int)
+    parser.add_argument('--allow_tf32', action='store_true',
+                        help='Enable TF32 on matmul and cuDNN for faster training on Ampere+ GPUs')
     parser.add_argument('--debug_one_image', action='store_true',
                         help='Debug mode: dataset returns a single sample repeated N times')
     parser.add_argument('--resume', default='',
@@ -267,6 +269,9 @@ def main(args):
     np.random.seed(seed)
 
     cudnn.benchmark = True
+    if args.allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     num_tasks = misc.get_world_size()
     global_rank = misc.get_rank()
