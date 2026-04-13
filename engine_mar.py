@@ -119,9 +119,7 @@ def train_one_epoch(
         loss_scaler(loss, optimizer, clip_grad=args.grad_clip, parameters=model.parameters(), update_grad=True)
         optimizer.zero_grad()
 
-        torch.cuda.synchronize()
-
-        # EMA update
+        # EMA update (CUDA ops are ordered within a stream — no explicit sync needed)
         update_ema(ema_params, model_params, rate=args.ema_rate)
 
         metric_logger.update(loss=loss_value)
@@ -131,32 +129,37 @@ def train_one_epoch(
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
 
-        loss_value_reduce = misc.all_reduce_mean(loss_value)
+        # Only all-reduce and log at print_freq intervals to minimize
+        # cross-node communication.  The local (un-reduced) loss is still
+        # tracked in metric_logger every step for the epoch-end average.
+        is_log_step = (data_iter_step % print_freq == 0) or (data_iter_step == len(data_loader) - 1)
 
-        # Global iteration step across all epochs.
-        train_step = epoch * len(data_loader) + data_iter_step
+        if is_log_step:
+            loss_value_reduce = misc.all_reduce_mean(loss_value)
 
-        # Logging
-        if log_writer is not None:
-            epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
-            log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
-            log_writer.add_scalar('lr', lr, epoch_1000x)
-            log_writer.add_scalar('train_step', train_step, epoch_1000x)
-            for key, value in loss_log.items():
-                log_writer.add_scalar(f'train_{key}', value, epoch_1000x)
+            # Global iteration step across all epochs.
+            train_step = epoch * len(data_loader) + data_iter_step
 
-        if wandb_run is not None:
-            epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
-            wandb_log = {
-                'train_loss': loss_value_reduce,
-                'lr': lr,
-                'epoch': epoch,
-                'step': epoch_1000x,
-                'train_step': train_step,
-            }
-            for key, value in loss_log.items():
-                wandb_log[f'train_{key}'] = value
-            wandb_run.log(wandb_log, step=epoch_1000x)
+            if log_writer is not None:
+                epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
+                log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
+                log_writer.add_scalar('lr', lr, epoch_1000x)
+                log_writer.add_scalar('train_step', train_step, epoch_1000x)
+                for key, value in loss_log.items():
+                    log_writer.add_scalar(f'train_{key}', value, epoch_1000x)
+
+            if wandb_run is not None:
+                epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
+                wandb_log = {
+                    'train_loss': loss_value_reduce,
+                    'lr': lr,
+                    'epoch': epoch,
+                    'step': epoch_1000x,
+                    'train_step': train_step,
+                }
+                for key, value in loss_log.items():
+                    wandb_log[f'train_{key}'] = value
+                wandb_run.log(wandb_log, step=epoch_1000x)
 
     # Gather stats from all processes
     metric_logger.synchronize_between_processes()
