@@ -162,6 +162,8 @@ def get_args_parser():
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N')
     parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--prefetch_factor', default=None, type=int,
+                        help='Number of batches loaded in advance by each worker (default: None = PyTorch default)')
     parser.add_argument('--pin_mem', action='store_true')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
@@ -184,6 +186,10 @@ def get_args_parser():
     parser.add_argument('--local_rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://')
+    parser.add_argument('--gradient_as_bucket_view', action='store_true', default=False,
+                        help='Use gradient_as_bucket_view in DDP for reduced memory')
+    parser.add_argument('--bucket_cap_mb', default=None, type=float,
+                        help='DDP bucket_cap_mb (default: None = PyTorch default 25MB)')
 
     return parser
 
@@ -416,13 +422,17 @@ def main(args):
     )
     print("Sampler_train = %s" % str(sampler_train))
 
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
+    _loader_kwargs = dict(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
         persistent_workers=True if args.num_workers > 0 else False,
+    )
+    if args.prefetch_factor is not None:
+        _loader_kwargs['prefetch_factor'] = args.prefetch_factor
+    data_loader_train = torch.utils.data.DataLoader(
+        dataset_train, sampler=sampler_train, **_loader_kwargs,
     )
 
     # ------------------------------------------------------------------
@@ -516,7 +526,12 @@ def main(args):
     print("effective batch size: %d" % eff_batch_size)
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        _ddp_kwargs = dict(device_ids=[args.gpu])
+        if args.gradient_as_bucket_view:
+            _ddp_kwargs['gradient_as_bucket_view'] = True
+        if args.bucket_cap_mb is not None:
+            _ddp_kwargs['bucket_cap_mb'] = args.bucket_cap_mb
+        model = torch.nn.parallel.DistributedDataParallel(model, **_ddp_kwargs)
         model_without_ddp = model.module
 
     param_groups = misc.build_param_groups_with_warmup_filter(
