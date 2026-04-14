@@ -122,6 +122,8 @@ def train_one_epoch(
                 print(f"Loss was NaN/Inf for {nan_streak} consecutive steps, stopping training")
                 sys.exit(1)
             optimizer.zero_grad()
+            del loss, loss_log
+            torch.cuda.empty_cache()
             continue
 
         nan_streak = 0

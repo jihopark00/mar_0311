@@ -1,19 +1,19 @@
 #!/bin/bash
 # Multi-GPU training script for xAR Pixel models
 # Usage: bash scripts/train_pixel_multi_gpu.sh
-
+export CUDA_LAUNCH_BLOCKING=1
 # Wandb configuration
 wandb_key="4ab8d4a0db9aec6c80956ccf58616de15392a463"
 wandb_project="ssl2gen"
 wandb_entity="qkrwlgh0314"
 
 # Dataset options: cifar10-hf, tiny-imagenet-hf, mnist-hf, imagenet
-run_name="0412_mardino-base" # "0412_mardino-giant" # 0412_mardino-base
+run_name="0414_mardino-giant_lora" # "0412_mardino-giant" # 0412_mardino-base
 exps_dir="./ho_mar_0311"
 config=$exps_dir/$run_name/config.yaml
 
 # ongoing: high-resolution good? 
-torchrun --nnodes=1 --nproc_per_node=4 --master_port=11121 main_mar.py \
+torchrun --nnodes=1 --nproc_per_node=4 --master_port=41242 main_mar.py \
     --config "$config" \
     --dtype "bf16" \
     --num_workers 8 \
@@ -29,7 +29,7 @@ torchrun --nnodes=1 --nproc_per_node=4 --master_port=11121 main_mar.py \
     --resume_last \
     --use_cached \
     --cached_path /scratch2/ljeadec31/imagenet_mar_sdvae \
-    # --feat_cached_root /scratch2/ljeadec31/imagenet_dinov2_vitg14_reg \
+    --feat_cached_root /scratch2/ljeadec31/imagenet_dinov2_vitg14_reg \
     # --wandb_key "${wandb_key}" \
     # --wandb_project "${wandb_project}" \
     # --wandb_entity "${wandb_entity}" \
