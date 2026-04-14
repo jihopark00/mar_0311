@@ -62,6 +62,8 @@ def get_args_parser():
     p.add_argument("--dtype", default="bf16", type=str,
                    choices=["fp32", "fp16", "bf16"])
     p.add_argument("--seed", default=0, type=int)
+    p.add_argument("--no_ema", action="store_true",
+                   help="Use training weights instead of EMA weights")
 
     # Output options
     p.add_argument("--save_samples_dir", default=None, type=str,
@@ -113,10 +115,11 @@ _CSV_COLUMNS = [
     "run_name", "train_step", "fid", "is",
     "num_images", "batch_size", "num_iter", "cfg", "cfg_schedule",
     "temperature", "dtype", "seed",
+    "use_ema", "ema_rate",
 ]
 
 
-def log_to_csv(csv_path, args, fid, inception_score):
+def log_to_csv(csv_path, args, fid, inception_score, use_ema, ema_rate):
     """Append a result row to *csv_path* with exclusive file locking."""
     file_exists = os.path.isfile(csv_path) and os.path.getsize(csv_path) > 0
     with open(csv_path, "a", newline="") as f:
@@ -130,6 +133,7 @@ def log_to_csv(csv_path, args, fid, inception_score):
                 f"{fid:.4f}", f"{inception_score:.4f}",
                 args.num_images, args.batch_size, args.num_iter, args.cfg, args.cfg_schedule,
                 args.temperature, args.dtype, args.seed,
+                use_ema, ema_rate if ema_rate is not None else "",
             ])
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
@@ -185,16 +189,43 @@ def main(args):
     model_config["grad_checkpointing"] = False
     model = models_mar.__dict__[model_name](**model_config)
 
-    # ── load checkpoint (EMA weights) ─────────────────────────────────
+    # ── load checkpoint ─────────────────────────────────────────────────
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     ema_state = checkpoint.get("model_ema")
+    train_state = checkpoint.get("model")
+
+    # Log available weight info
+    ema_norm = None
     if ema_state is not None:
+        ema_norm = sum(v.float().norm().item() ** 2 for v in ema_state.values()) ** 0.5
+    train_norm = None
+    if train_state is not None:
+        train_norm = sum(v.float().norm().item() ** 2 for v in train_state.values()) ** 0.5
+
+    if rank == 0:
+        print(f"Checkpoint keys: {list(checkpoint.keys())}")
+        print(f"  EMA weights:   {'available' if ema_state is not None else 'NOT available'}")
+        print(f"  Train weights: {'available' if train_state is not None else 'NOT available'}")
+        if ema_state is not None:
+            print(f"  EMA   — #params: {len(ema_state)}, L2 norm: {ema_norm:.4f}")
+        if train_state is not None:
+            print(f"  Train — #params: {len(train_state)}, L2 norm: {train_norm:.4f}")
+
+    use_ema = not args.no_ema
+    if use_ema and ema_state is not None:
         model.load_state_dict(ema_state)
         print(f"Loaded EMA weights from {ckpt_path}")
+    elif train_state is not None:
+        model.load_state_dict(train_state)
+        if use_ema:
+            use_ema = False  # reflect actual state
+            print(f"WARNING: --no_ema not set but model_ema is None, "
+                  f"falling back to training weights from {ckpt_path}")
+        else:
+            print(f"Loaded training weights from {ckpt_path} (--no_ema)")
     else:
-        model.load_state_dict(checkpoint["model"])
-        print(f"WARNING: model_ema is None, using training weights from {ckpt_path}")
-    del checkpoint
+        raise RuntimeError(f"No loadable weights found in {ckpt_path}")
+    del checkpoint, ema_state, train_state
     model.to(device).eval()
     torch.cuda.empty_cache()
 
@@ -325,7 +356,8 @@ def main(args):
 
     # ── log to CSV (rank 0) ──────────────────────────────────────────
     if rank == 0 and args.csv_file and fid is not None:
-        log_to_csv(args.csv_file, args, fid, inception_score)
+        ema_rate = cfg.get("training", {}).get("ema_rate")
+        log_to_csv(args.csv_file, args, fid, inception_score, use_ema, ema_rate)
         print(f"Results appended to {args.csv_file}")
 
     # ── cleanup generated image folder ─────────────────────────────────

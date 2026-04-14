@@ -78,6 +78,9 @@ def train_one_epoch(
         print('log_dir: {}'.format(log_writer.log_dir))
 
     use_cached = getattr(args, 'use_cached', False)
+    nan_streak = 0
+    nan_total = 0
+    max_nan_streak = 4
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         # Per-iteration learning rate schedule
@@ -112,8 +115,16 @@ def train_one_epoch(
         loss_value = loss.item()
 
         if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
+            nan_streak += 1
+            nan_total += 1
+            print(f"WARNING: Loss is {loss_value} (consecutive: {nan_streak}/{max_nan_streak}, total: {nan_total})")
+            if nan_streak >= max_nan_streak:
+                print(f"Loss was NaN/Inf for {nan_streak} consecutive steps, stopping training")
+                sys.exit(1)
+            optimizer.zero_grad()
+            continue
+
+        nan_streak = 0
 
         # Backward pass with gradient scaling
         loss_scaler(loss, optimizer, clip_grad=args.grad_clip, parameters=model.parameters(), update_grad=True)

@@ -48,6 +48,7 @@ class MAR_DINO(nn.Module):
                  dinov2_repo_path='facebookresearch/dinov2',
                  dinov2_pretrained=True,
                  dino_attn_fp32=False,
+                 diffloss_fp32=False,
                  freeze_dino=['norm', 'cls_token', 'register_tokens', 'mask_token', 'pos_embed'],
                  freeze_dino_blocks=[],
                  lora_dino_blocks=[],
@@ -160,6 +161,7 @@ class MAR_DINO(nn.Module):
         diffloss_class = eval(diffloss_class)
         self.diffloss = diffloss_class(**diffloss_kwargs)
         self.diffusion_batch_mul = diffusion_batch_mul
+        self.diffloss_fp32 = diffloss_fp32
 
         # Apply PEFT-style tuning controls to the dinov2 backbone.
         self._apply_dino_tuning(
@@ -327,10 +329,10 @@ class MAR_DINO(nn.Module):
         def attn_forward_fp32(self_attn, x):
             B, N, C = x.shape
             orig_dtype = x.dtype
-            # qkv = self_attn.qkv(x)
+            qkv = self_attn.qkv(x)
             with torch.cuda.amp.autocast(enabled=False):
-                qkv = self_attn.qkv(x.float())
-                # qkv = qkv.float()
+                # qkv = self_attn.qkv(x.float())
+                qkv = qkv.float()
                 q, k, v = qkv.reshape(B, N, 3, self_attn.num_heads, C // self_attn.num_heads).unbind(2)
                 q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
                 out = F.scaled_dot_product_attention(
@@ -601,11 +603,13 @@ class MAR_DINO(nn.Module):
         target = target.reshape(bsz * seq_len, -1).repeat(self.diffusion_batch_mul, 1)
         z = z.reshape(bsz*seq_len, -1).repeat(self.diffusion_batch_mul, 1)
         mask = mask.reshape(bsz*seq_len).repeat(self.diffusion_batch_mul)
-        loss = self.diffloss(z=z, target=target, mask=mask)
-        # # Run DiffLoss in fp32: IDDPM's normal_kl / discretized_gaussian_log_likelihood
-        # # overflow in bf16 (exp of learned logvar), producing NaN.
-        # with torch.cuda.amp.autocast(enabled=False):
-        #     loss = self.diffloss(z=z.float(), target=target.float(), mask=mask.float())
+        if self.diffloss_fp32:
+            # Run DiffLoss in fp32: IDDPM's normal_kl / discretized_gaussian_log_likelihood
+            # overflow in bf16 (exp of learned logvar), producing NaN.
+            with torch.cuda.amp.autocast(enabled=False):
+                loss = self.diffloss(z=z.float(), target=target.float(), mask=mask.float())
+        else:
+            loss = self.diffloss(z=z, target=target, mask=mask)
         return loss
 
     def forward(self, x, labels, imgs_pixel=None, feat=None):
