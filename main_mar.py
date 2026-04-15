@@ -197,6 +197,8 @@ def get_args_parser():
 
 
 def main(args):
+    start_time = time.time()
+
     # ------------------------------------------------------------------
     # Resolve run directory: output_dir/run_name
     # ------------------------------------------------------------------
@@ -594,7 +596,6 @@ def main(args):
         print(f"Start training for {args.epochs} epochs (time limit: {args.time_limit}h)")
     else:
         print(f"Start training for {args.epochs} epochs")
-    start_time = time.time()
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
