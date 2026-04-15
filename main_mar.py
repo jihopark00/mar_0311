@@ -644,15 +644,26 @@ def main(args):
             if log_writer is not None:
                 log_writer.flush()
 
-        # Time limit check: stop if next epoch would exceed the limit
+        # Time limit check: rank 0 decides, then broadcast to all ranks
         if time_limit_secs is not None:
-            elapsed = time.time() - start_time
-            remaining = time_limit_secs - elapsed
-            if remaining < epoch_duration * 1.1:
+            if misc.is_main_process():
+                elapsed = time.time() - start_time
+                remaining = time_limit_secs - elapsed
+                should_stop = remaining < epoch_duration * 1.1
+            else:
+                should_stop = False
+
+            if args.distributed:
+                t = torch.tensor([int(should_stop)], device=device)
+                torch.distributed.broadcast(t, src=0)
+                should_stop = t.item() == 1
+
+            if should_stop:
+                elapsed = time.time() - start_time
                 print(f"Time limit reached after epoch {epoch}. "
                       f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed)))}, "
                       f"limit: {str(datetime.timedelta(seconds=int(time_limit_secs)))}. "
-                      f"Last epoch took {epoch_duration:.0f}s, remaining {remaining:.0f}s.")
+                      f"Last epoch took {epoch_duration:.0f}s.")
                 break
 
     total_time = time.time() - start_time
