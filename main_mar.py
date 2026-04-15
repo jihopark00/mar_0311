@@ -110,6 +110,8 @@ def get_args_parser():
     parser.add_argument('--batch_size', default=16, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * # gpus)')
     parser.add_argument('--epochs', default=400, type=int)
+    parser.add_argument('--time_limit', default=None, type=float,
+                        help='Training time limit in hours. Stops at the last epoch that fits within the limit.')
 
     # Generation parameters
     parser.add_argument('--num_iter', default=50, type=int,
@@ -587,13 +589,18 @@ def main(args):
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    print(f"Start training for {args.epochs} epochs")
+    time_limit_secs = args.time_limit * 3600 if args.time_limit is not None else None
+    if time_limit_secs is not None:
+        print(f"Start training for {args.epochs} epochs (time limit: {args.time_limit}h)")
+    else:
+        print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
+        epoch_start = time.time()
         train_one_epoch(
             model, vae,
             model_params, ema_params,
@@ -603,6 +610,7 @@ def main(args):
             args=args,
             wandb_run=wandb_run,
         )
+        epoch_duration = time.time() - epoch_start
 
         # Save checkpoint
         if epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs:
@@ -634,6 +642,17 @@ def main(args):
         if misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
+
+        # Time limit check: stop if next epoch would exceed the limit
+        if time_limit_secs is not None:
+            elapsed = time.time() - start_time
+            remaining = time_limit_secs - elapsed
+            if remaining < epoch_duration * 1.1:
+                print(f"Time limit reached after epoch {epoch}. "
+                      f"Elapsed: {str(datetime.timedelta(seconds=int(elapsed)))}, "
+                      f"limit: {str(datetime.timedelta(seconds=int(time_limit_secs)))}. "
+                      f"Last epoch took {epoch_duration:.0f}s, remaining {remaining:.0f}s.")
+                break
 
     total_time = time.time() - start_time
     print('Training time {}'.format(str(datetime.timedelta(seconds=int(total_time)))))
