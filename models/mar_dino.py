@@ -57,6 +57,7 @@ class MAR_DINO(nn.Module):
                  use_repa_cached_feat=False,
                  repa_loss_weight=0.5,
                  repa_save_vram=False,
+                 repa_on_unmasked=False,
                  dinov2_repa_name=None,
                  repa_input_size=None,
                  ):
@@ -181,6 +182,7 @@ class MAR_DINO(nn.Module):
         self.use_repa_cached_feat = use_repa_cached_feat
         self.repa_loss_weight = float(repa_loss_weight)
         self.repa_save_vram = repa_save_vram
+        self.repa_on_unmasked = repa_on_unmasked
         # populated by forward_mae_decoder when training+use_repa, cleared in forward()
         self.repa_feat_pred = None
         
@@ -674,7 +676,20 @@ class MAR_DINO(nn.Module):
                     f"REPA shape mismatch: pred {tuple(pred.shape)} vs "
                     f"gt {tuple(repa_feat_gt.shape)}"
                 )
-            repa_loss = (1.0 - F.cosine_similarity(pred, repa_feat_gt, dim=-1)).mean()
+            if self.repa_on_unmasked:
+                # pred/gt shape: (bsz, 1+R+L, D) — cls + registers + image tokens
+                # mask shape: (bsz, L) — 1=masked, 0=unmasked
+                prefix = 1 + self.num_register  # cls + register tokens
+                cos_sim = F.cosine_similarity(pred, repa_feat_gt, dim=-1)  # (bsz, 1+R+L)
+                # build per-token weight: 1 for cls/register, (1-mask) for image tokens
+                img_weight = 1.0 - mask  # (bsz, L), 1=unmasked, 0=masked
+                weight = torch.cat([
+                    torch.ones(mask.shape[0], prefix, device=mask.device),
+                    img_weight,
+                ], dim=1)  # (bsz, 1+R+L)
+                repa_loss = ((1.0 - cos_sim) * weight).sum() / weight.sum().clamp(min=1.0)
+            else:
+                repa_loss = (1.0 - F.cosine_similarity(pred, repa_feat_gt, dim=-1)).mean()
             loss = loss + self.repa_loss_weight * repa_loss
             log_dict["repa_loss"] = repa_loss.detach().item()
             self.repa_feat_pred = None
