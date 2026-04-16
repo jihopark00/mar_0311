@@ -111,17 +111,18 @@ class MAR_DINO_0416(nn.Module):
         # --------------------------------------------------------------------------
         # MAR encoder specifics
         self.z_proj = nn.Linear(self.token_embed_dim, encoder_embed_dim, bias=True)
+        self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
         self.buffer_size = buffer_size
         self.encoder_depth = encoder_depth
 
         if encoder_depth > 0:
-            self.z_proj_ln = nn.LayerNorm(encoder_embed_dim, eps=1e-6)
             self.encoder_pos_embed_learned = nn.Parameter(torch.zeros(1, self.seq_len + self.buffer_size, encoder_embed_dim))
 
         self.encoder_blocks = nn.ModuleList([
             Block(encoder_embed_dim, encoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
                   proj_drop=proj_dropout, attn_drop=attn_dropout) for _ in range(encoder_depth)])
-        self.encoder_norm = norm_layer(encoder_embed_dim)
+        if encoder_depth > 0:
+            self.encoder_norm = norm_layer(encoder_embed_dim)
 
         # --------------------------------------------------------------------------
         # Dino embedding: projection from encoder_embed_dim to dino_embed_dim,
@@ -154,7 +155,8 @@ class MAR_DINO_0416(nn.Module):
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
                   proj_drop=proj_dropout, attn_drop=attn_dropout) for _ in range(decoder_depth)])
 
-        self.decoder_norm = norm_layer(decoder_embed_dim)
+        if decoder_depth > 0:
+            self.decoder_norm = norm_layer(decoder_embed_dim)
         self.diffusion_pos_embed_learned = nn.Parameter(torch.zeros(1, self.seq_len, decoder_embed_dim))
 
         self.initialize_weights()
@@ -369,18 +371,18 @@ class MAR_DINO_0416(nn.Module):
 
     def print_trainable_parameters(self):
         """Print a per-component summary of trainable vs total parameters."""
+        encoder_modules = [self.z_proj, self.z_proj_ln, self.encoder_blocks]
+        if self.encoder_depth > 0:
+            encoder_modules.append(self.encoder_norm)
+        decoder_modules = [self.decoder_embed, self.decoder_blocks]
+        if self.decoder_depth > 0:
+            decoder_modules.append(self.decoder_norm)
         groups = {
             "dinov2_backbone": self.dinov2_backbone,
-            "mar_encoder": nn.ModuleList(
-                [self.z_proj, self.z_proj_ln, self.encoder_blocks, self.encoder_norm]
-                if self.encoder_depth > 0 else
-                [self.z_proj, self.encoder_blocks, self.encoder_norm]
-            ),
+            "mar_encoder": nn.ModuleList(encoder_modules),
             "dino_embed (proj)": self.dino_embed,
             "dino_embed_buffer (proj)": self.dino_embed_buffer,
-            "mar_decoder": nn.ModuleList([
-                self.decoder_embed, self.decoder_blocks, self.decoder_norm,
-            ]),
+            "mar_decoder": nn.ModuleList(decoder_modules),
             "diffloss": self.diffloss,
             "class_emb": self.class_emb,
         }
@@ -436,14 +438,16 @@ class MAR_DINO_0416(nn.Module):
         # Skip the dinov2 backbone so its pretrained weights are not overwritten.
         modules_to_init = [
             self.z_proj,
-            self.encoder_blocks, self.encoder_norm,
+            self.z_proj_ln,
+            self.encoder_blocks,
             self.dino_embed,
             self.dino_embed_buffer,
-            self.decoder_embed, self.decoder_blocks, self.decoder_norm,
-            self.class_emb,
+            self.decoder_embed, self.decoder_blocks,
         ]
         if self.encoder_depth > 0:
-            modules_to_init.append(self.z_proj_ln)
+            modules_to_init.append(self.encoder_norm)
+        if self.decoder_depth > 0:
+            modules_to_init.append(self.decoder_norm)
         for module in modules_to_init:
             module.apply(self._init_weights)
         if not self.dinov2_pretrained:
@@ -530,16 +534,19 @@ class MAR_DINO_0416(nn.Module):
             class_embedding = drop_latent_mask * self.fake_latent + (1 - drop_latent_mask) * class_embedding
 
         x[:, :self.buffer_size] = class_embedding.unsqueeze(1)
-
-        if self.encoder_depth > 0:
-            # encoder position embedding
-            x = x + self.encoder_pos_embed_learned
-            x = self.z_proj_ln(x)
+        
+        x = self.z_proj_ln(x)
 
         # dropping
         x = x[(1-mask_with_buffer).nonzero(as_tuple=True)].reshape(bsz, -1, embed_dim)
 
         if self.encoder_depth > 0:
+            # encoder position embedding (gather entries for surviving positions)
+            pos_embed = self.encoder_pos_embed_learned.expand(bsz, -1, -1)[
+                (1 - mask_with_buffer).nonzero(as_tuple=True)
+            ].reshape(bsz, -1, embed_dim)
+            x = x + pos_embed
+
             # apply Transformer blocks
             if self.grad_checkpointing and self.training and not torch.jit.is_scripting():
                 for block in self.encoder_blocks:
@@ -547,7 +554,7 @@ class MAR_DINO_0416(nn.Module):
             else:
                 for block in self.encoder_blocks:
                     x = block(x)
-        x = self.encoder_norm(x)
+            x = self.encoder_norm(x)
 
         return x
 
@@ -640,7 +647,7 @@ class MAR_DINO_0416(nn.Module):
             else:
                 for blk in self.decoder_blocks:
                     x = blk(x)
-        x = self.decoder_norm(x)
+            x = self.decoder_norm(x)
 
         # 7. Strip buffer + cls + register → only image tokens fed to diffloss.
         x = x[:, buf + 1 + R:]

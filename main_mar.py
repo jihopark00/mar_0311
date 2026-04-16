@@ -166,7 +166,7 @@ def get_args_parser():
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N')
     parser.add_argument('--num_workers', default=10, type=int)
-    parser.add_argument('--prefetch_factor', default=2, type=int,
+    parser.add_argument('--prefetch_factor', default=None, type=int,
                         help='Number of batches loaded in advance by each worker (default: None = PyTorch default)')
     parser.add_argument('--pin_mem', action='store_true')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
