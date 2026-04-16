@@ -155,8 +155,7 @@ class MAR_DINO_0416(nn.Module):
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer,
                   proj_drop=proj_dropout, attn_drop=attn_dropout) for _ in range(decoder_depth)])
 
-        if decoder_depth > 0:
-            self.decoder_norm = norm_layer(decoder_embed_dim)
+        self.decoder_norm = norm_layer(decoder_embed_dim)
         self.diffusion_pos_embed_learned = nn.Parameter(torch.zeros(1, self.seq_len, decoder_embed_dim))
 
         self.initialize_weights()
@@ -374,9 +373,7 @@ class MAR_DINO_0416(nn.Module):
         encoder_modules = [self.z_proj, self.z_proj_ln, self.encoder_blocks]
         if self.encoder_depth > 0:
             encoder_modules.append(self.encoder_norm)
-        decoder_modules = [self.decoder_embed, self.decoder_blocks]
-        if self.decoder_depth > 0:
-            decoder_modules.append(self.decoder_norm)
+        decoder_modules = [self.decoder_embed, self.decoder_blocks, self.decoder_norm]
         groups = {
             "dinov2_backbone": self.dinov2_backbone,
             "mar_encoder": nn.ModuleList(encoder_modules),
@@ -443,11 +440,10 @@ class MAR_DINO_0416(nn.Module):
             self.dino_embed,
             self.dino_embed_buffer,
             self.decoder_embed, self.decoder_blocks,
+            self.decoder_norm,
         ]
         if self.encoder_depth > 0:
             modules_to_init.append(self.encoder_norm)
-        if self.decoder_depth > 0:
-            modules_to_init.append(self.decoder_norm)
         for module in modules_to_init:
             module.apply(self._init_weights)
         if not self.dinov2_pretrained:
@@ -647,7 +643,7 @@ class MAR_DINO_0416(nn.Module):
             else:
                 for blk in self.decoder_blocks:
                     x = blk(x)
-            x = self.decoder_norm(x)
+        x = self.decoder_norm(x)
 
         # 7. Strip buffer + cls + register → only image tokens fed to diffloss.
         x = x[:, buf + 1 + R:]
