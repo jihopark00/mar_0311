@@ -62,6 +62,7 @@ class MAR_DINO_0416(nn.Module):
                  repa_input_size=None,
                  use_align_dino_embed=False,
                  align_dino_embed_loss_weight=0.1,
+                 align_dino_embed_loss_type='mse',
                  ):
         super().__init__()
 
@@ -199,6 +200,12 @@ class MAR_DINO_0416(nn.Module):
         # target patch_embed is meaningful.
         self.use_align_dino_embed = use_align_dino_embed
         self.align_dino_embed_loss_weight = float(align_dino_embed_loss_weight)
+        if align_dino_embed_loss_type not in ('mse', 'cos'):
+            raise ValueError(
+                f"align_dino_embed_loss_type must be 'mse' or 'cos', "
+                f"got {align_dino_embed_loss_type!r}"
+            )
+        self.align_dino_embed_loss_type = align_dino_embed_loss_type
         # populated by forward_mae_decoder when training+use_align_dino_embed
         self.align_feat_pred = None
         if use_align_dino_embed and not dinov2_pretrained:
@@ -772,11 +779,14 @@ class MAR_DINO_0416(nn.Module):
                 dino_embed_gt = self.dinov2_backbone.patch_embed(pix)  # (bsz, L, Dd)
 
             # pred is the full (bsz, L, Dd) image-token sequence with mask_token
-            # at masked positions. Compute element-wise MSE against the full gt
-            # and weight by (1-mask) so only visible positions contribute.
+            # at masked positions. Weight by (1-mask) so only visible positions
+            # contribute to the loss.
             keep = 1.0 - mask  # (bsz, L)
-            sq_err = (pred - dino_embed_gt).pow(2).mean(dim=-1)  # (bsz, L)
-            align_loss = (sq_err * keep).sum() / keep.sum().clamp(min=1.0)
+            if self.align_dino_embed_loss_type == 'cos':
+                per_tok = 1.0 - F.cosine_similarity(pred, dino_embed_gt, dim=-1)  # (bsz, L)
+            else:
+                per_tok = (pred - dino_embed_gt).pow(2).mean(dim=-1)  # (bsz, L)
+            align_loss = (per_tok * keep).sum() / keep.sum().clamp(min=1.0)
             loss = loss + self.align_dino_embed_loss_weight * align_loss
             log_dict["align_dino_embed_loss"] = align_loss.detach().item()
             self.align_feat_pred = None
