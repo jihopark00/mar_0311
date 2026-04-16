@@ -21,7 +21,7 @@ def mask_by_order(mask_len, order, bsz, seq_len):
     return masking
 
 
-class MAR_DINO(nn.Module):
+class MAR_DINO_0416(nn.Module):
     """ MAR with dinov2 transformer blocks injected between the MAR encoder and decoder.
     """
     def __init__(self, img_size=256, vae_stride=16, patch_size=1,
@@ -49,7 +49,7 @@ class MAR_DINO(nn.Module):
                  dinov2_pretrained=True,
                  dino_attn_fp32=False,
                  diffloss_fp32=False,
-                 freeze_dino=['norm', 'cls_token', 'register_tokens', 'mask_token', 'pos_embed'],
+                 freeze_dino=['patch_embed'], # ['norm', 'cls_token', 'register_tokens', 'mask_token', 'pos_embed'],
                  freeze_dino_blocks=[],
                  lora_dino_blocks=[],
                  lora_config=None,
@@ -60,6 +60,8 @@ class MAR_DINO(nn.Module):
                  repa_on_unmasked=False,
                  dinov2_repa_name=None,
                  repa_input_size=None,
+                 use_align_dino_embed=False,
+                 align_dino_embed_loss_weight=0.1,
                  ):
         super().__init__()
 
@@ -123,8 +125,12 @@ class MAR_DINO(nn.Module):
 
         # --------------------------------------------------------------------------
         # Dino embedding: projection from encoder_embed_dim to dino_embed_dim,
-        # applied before the dinov2 transformer blocks.
+        # applied before the dinov2 transformer blocks. `dino_embed` handles the
+        # visible image tokens; `dino_embed_buffer` handles the MAR buffer
+        # (class-embedding) tokens separately so the two streams do not share a
+        # projection.
         self.dino_embed = nn.Linear(encoder_embed_dim, dino_embed_dim, bias=True)
+        self.dino_embed_buffer = nn.Linear(encoder_embed_dim, dino_embed_dim, bias=True)
 
         # --------------------------------------------------------------------------
         # Positional embedding for buffer tokens in the dino block stage.
@@ -186,7 +192,21 @@ class MAR_DINO(nn.Module):
         # populated by forward_mae_decoder when training+use_repa, cleared in forward()
         self.repa_feat_pred = None
 
-        if use_repa:
+        # --------------------------------------------------------------------------
+        # Align dino_embed output (on visible image tokens) with the dinov2
+        # patch_embed output on raw pixels. Requires a pretrained dinov2 so the
+        # target patch_embed is meaningful.
+        self.use_align_dino_embed = use_align_dino_embed
+        self.align_dino_embed_loss_weight = float(align_dino_embed_loss_weight)
+        # populated by forward_mae_decoder when training+use_align_dino_embed
+        self.align_feat_pred = None
+        if use_align_dino_embed and not dinov2_pretrained:
+            raise ValueError(
+                "use_align_dino_embed=True requires dinov2_pretrained=True "
+                "so patch_embed produces a meaningful target."
+            )
+
+        if use_repa or use_align_dino_embed:
             self.register_buffer(
                 "repa_mean",
                 torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1),
@@ -357,6 +377,7 @@ class MAR_DINO(nn.Module):
                 [self.z_proj, self.encoder_blocks, self.encoder_norm]
             ),
             "dino_embed (proj)": self.dino_embed,
+            "dino_embed_buffer (proj)": self.dino_embed_buffer,
             "mar_decoder": nn.ModuleList([
                 self.decoder_embed, self.decoder_blocks, self.decoder_norm,
             ]),
@@ -417,6 +438,7 @@ class MAR_DINO(nn.Module):
             self.z_proj,
             self.encoder_blocks, self.encoder_norm,
             self.dino_embed,
+            self.dino_embed_buffer,
             self.decoder_embed, self.decoder_blocks, self.decoder_norm,
             self.class_emb,
         ]
@@ -426,6 +448,19 @@ class MAR_DINO(nn.Module):
             module.apply(self._init_weights)
         if not self.dinov2_pretrained:
             self.dinov2_backbone.apply(self._init_weights)
+
+            # Parameter들은 apply로 안 닿으므로 직접 재init (mar.py 규약에 맞춤)
+            nn.init.normal_(self.dinov2_backbone.mask_token, std=.02)   # 원래 zeros
+            nn.init.normal_(self.dinov2_backbone.cls_token,  std=.02)   # 원래 1e-6
+            if self.dinov2_backbone.register_tokens is not None:
+                nn.init.normal_(self.dinov2_backbone.register_tokens, std=.02)  # 원래 1e-6
+            nn.init.trunc_normal_(self.dinov2_backbone.pos_embed, std=.02)      # 이미 .02지만 명시
+
+            # LayerScale γ: scratch 안정성 위해 1.0 → 1e-4
+            for blk in self.dinov2_backbone.blocks:
+                for ls in (blk.ls1, blk.ls2):
+                    if hasattr(ls, 'gamma'):
+                        nn.init.constant_(ls.gamma, 1e-4)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -523,8 +558,18 @@ class MAR_DINO(nn.Module):
         Dd = self.dino_embed_dim
         R = self.num_register
 
-        # 1. Project encoder output to dino embedding dim
-        x = self.dino_embed(x)  # (bsz, num_visible, Dd)
+        # 1. Project encoder output to dino embedding dim. Buffer tokens (the
+        #    class-embedding stream) and visible image tokens use separate
+        #    projections.
+        x_buffer = self.dino_embed_buffer(x[:, :buf])      # (bsz, buf, Dd)
+        x_dino_embed  = self.dino_embed(x[:, buf:])             # (bsz, num_visible, Dd)
+
+        # Capture dino_embed output on visible image tokens for alignment with
+        # patch_embed on raw pixels (consumed in forward()).
+        if self.use_align_dino_embed and self.training:
+            self.align_feat_pred = x_dino_embed.contiguous()    # (bsz, num_visible, Dd)
+
+        x = torch.cat([x_buffer, x_dino_embed], dim=1)          # (bsz, buf+num_visible, Dd)
 
         # 2. Scatter visible tokens back into the full (buffer + image) sequence,
         #    filling the gaps with dinov2's mask_token.
@@ -651,6 +696,7 @@ class MAR_DINO(nn.Module):
 
         # 2. Standard MAR forward (forward_mae_decoder may populate repa_feat_pred).
         self.repa_feat_pred = None  # safety: clear stale state
+        self.align_feat_pred = None  # safety: clear stale state
         class_embedding = self.class_emb(labels)
         xp = self.patchify(x)
         gt_latents = xp.clone().detach()
@@ -693,6 +739,42 @@ class MAR_DINO(nn.Module):
             loss = loss + self.repa_loss_weight * repa_loss
             log_dict["repa_loss"] = repa_loss.detach().item()
             self.repa_feat_pred = None
+
+        # 4. Align dino_embed output on visible image tokens with patch_embed on
+        #    raw pixels.
+        if self.use_align_dino_embed and self.training:
+            pred = self.align_feat_pred
+            if pred is None:
+                raise RuntimeError(
+                    "use_align_dino_embed=True but forward_mae_decoder did not "
+                    "populate self.align_feat_pred (training flag mismatch?)"
+                )
+            if imgs_pixel is None:
+                raise ValueError("use_align_dino_embed=True requires `imgs_pixel`")
+
+            align_input_size = self.seq_w * self.dinov2_backbone.patch_size
+            with torch.no_grad():
+                pix = (imgs_pixel - self.repa_mean) / self.repa_std
+                if (pix.shape[-1] != align_input_size
+                        or pix.shape[-2] != align_input_size):
+                    pix = F.interpolate(
+                        pix,
+                        size=(align_input_size, align_input_size),
+                        mode="bicubic",
+                        antialias=True,
+                        align_corners=False,
+                    )
+                dino_embed_gt = self.dinov2_backbone.patch_embed(pix)  # (bsz, L, Dd)
+
+            # Gather ground-truth at the same visible (unmasked) positions that
+            # pred was produced from, in the same row-major order.
+            gt_vis = dino_embed_gt[(1 - mask).nonzero(as_tuple=True)].reshape(
+                pred.shape[0], pred.shape[1], pred.shape[2]
+            )
+            align_loss = F.mse_loss(pred, gt_vis)
+            loss = loss + self.align_dino_embed_loss_weight * align_loss
+            log_dict["align_dino_embed_loss"] = align_loss.detach().item()
+            self.align_feat_pred = None
 
         log_dict["loss"] = loss.detach().item()
         return loss, log_dict

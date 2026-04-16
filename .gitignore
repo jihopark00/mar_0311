@@ -7,3 +7,6 @@ ho_mar_0311/
 pretrained_models/
 # RAE-collections/
 RAE-collections/
+
+hf_down.py
+hf_upload.py

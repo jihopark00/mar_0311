@@ -147,6 +147,8 @@ def get_args_parser():
                              'params start at full LR from step 0. Empty list '
                              '(default) means all params are warmed up.')
 
+    parser.add_argument('--data_path', default=None, type=str,
+                        help='Path to dataset (overrides config dataset.path if provided)')
     parser.add_argument('--run_name', default="exp1", type=str)
     parser.add_argument('--output_dir', default='./output_dir')
     parser.add_argument('--device', default='cuda')
@@ -224,7 +226,8 @@ def main(args):
     # Dataset config from YAML
     dataset_cfg = cfg['dataset']
     args.dataset = dataset_cfg['name']
-    args.data_path = dataset_cfg.get('path', './data')
+    if args.data_path is None:
+        args.data_path = dataset_cfg.get('path', './data')
 
     # Training config from YAML (overrides CLI defaults, but CLI explicit values win)
     training_cfg = cfg.get('training', {})
