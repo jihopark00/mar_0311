@@ -564,11 +564,6 @@ class MAR_DINO_0416(nn.Module):
         x_buffer = self.dino_embed_buffer(x[:, :buf])      # (bsz, buf, Dd)
         x_dino_embed  = self.dino_embed(x[:, buf:])             # (bsz, num_visible, Dd)
 
-        # Capture dino_embed output on visible image tokens for alignment with
-        # patch_embed on raw pixels (consumed in forward()).
-        if self.use_align_dino_embed and self.training:
-            self.align_feat_pred = x_dino_embed.contiguous()    # (bsz, num_visible, Dd)
-
         x = torch.cat([x_buffer, x_dino_embed], dim=1)          # (bsz, buf+num_visible, Dd)
 
         # 2. Scatter visible tokens back into the full (buffer + image) sequence,
@@ -585,6 +580,13 @@ class MAR_DINO_0416(nn.Module):
         # 3. Split into MAR buffer (class) tokens and image tokens.
         buffer_tokens = x_after_pad[:, :buf]          # (bsz, buf, Dd)
         image_tokens  = x_after_pad[:, buf:]          # (bsz, L, Dd)
+
+        # Capture full image-token sequence (visible positions hold dino_embed
+        # output; masked positions hold dino mask_token) for alignment with
+        # patch_embed on raw pixels. The masked positions are filtered out via
+        # mask weighting in forward(), avoiding nonzero indexing.
+        if self.use_align_dino_embed and self.training:
+            self.align_feat_pred = image_tokens.contiguous()    # (bsz, L, Dd)
 
         # 4. Dinov2-style token preparation (mirrors prepare_tokens_with_masks).
         cls = self.dinov2_backbone.cls_token.expand(bsz, -1, -1)  # (bsz, 1, Dd)
@@ -766,12 +768,12 @@ class MAR_DINO_0416(nn.Module):
                     )
                 dino_embed_gt = self.dinov2_backbone.patch_embed(pix)  # (bsz, L, Dd)
 
-            # Gather ground-truth at the same visible (unmasked) positions that
-            # pred was produced from, in the same row-major order.
-            gt_vis = dino_embed_gt[(1 - mask).nonzero(as_tuple=True)].reshape(
-                pred.shape[0], pred.shape[1], pred.shape[2]
-            )
-            align_loss = F.mse_loss(pred, gt_vis)
+            # pred is the full (bsz, L, Dd) image-token sequence with mask_token
+            # at masked positions. Compute element-wise MSE against the full gt
+            # and weight by (1-mask) so only visible positions contribute.
+            keep = 1.0 - mask  # (bsz, L)
+            sq_err = (pred - dino_embed_gt).pow(2).mean(dim=-1)  # (bsz, L)
+            align_loss = (sq_err * keep).sum() / keep.sum().clamp(min=1.0)
             loss = loss + self.align_dino_embed_loss_weight * align_loss
             log_dict["align_dino_embed_loss"] = align_loss.detach().item()
             self.align_feat_pred = None
