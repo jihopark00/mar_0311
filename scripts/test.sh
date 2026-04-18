@@ -3,8 +3,8 @@
 # Usage: bash scripts/test.sh
 
 exps_dir="./ho_mar_0311"
-run_names=( 0414_mardino-giant_fp32_scratch ) # 0409_mar-base_dec-only) # "0405_marssllatent-base_imgnet") #  "0403_mar-base_imgnet-cache"
-train_steps=( 40 )
+run_names=( 0409_mar-base_dec-only ) # 0409_mar-base_dec-only) # "0405_marssllatent-base_imgnet") #  "0403_mar-base_imgnet-cache"
+train_steps=( 40)
 
 for run_name in "${run_names[@]}"; do
     for train_step in "${train_steps[@]}"; do
@@ -25,7 +25,7 @@ for run_name in "${run_names[@]}"; do
             --csv_file "${exps_dir}/eval_results.csv" \
             --fid_stats "fid_stats/adm_in256_stats.npz" \
             --clean_samples \
-            --no_ema \
+            # --no_ema \
             # --save_npz
     done
 done

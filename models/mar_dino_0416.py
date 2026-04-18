@@ -283,15 +283,21 @@ class MAR_DINO_0416(nn.Module):
           (e.g. norm, patch_embed) are accepted.
         - freeze_dino_blocks: indices into self.dinov2_backbone.blocks whose
           parameters are frozen entirely.
-        - lora_dino_blocks: indices into self.dinov2_backbone.blocks; each
-          listed block gets its target Linears wrapped with LoRALinear. The
-          base Linear weights are frozen by LoRALinear; other params in the
-          block (norm1/norm2/ls1/ls2) remain trainable.
+        - lora_dino_blocks: indices into self.dinov2_backbone.blocks that
+          receive PEFT-style tuning. Each such block is fully frozen first;
+          then (a) target_modules are wrapped with LoRA (if rank > 0), and
+          (b) any names in trainable_modules are unfrozen on that block.
+          May overlap with freeze_dino_blocks (redundant but allowed).
         - lora_config keys:
-            rank (int, required)
-            alpha (float, required)
-            target_modules (list[str], default ['attn.qkv', 'attn.proj'])
+            rank (int, required) — 0 disables LoRA wrapping (block still
+                frozen; trainable_modules still applied, enabling e.g.
+                norm-only tuning).
+            alpha (float, required when rank > 0)
             dropout (float, default 0.0)
+            target_modules (list[str], default ['attn.qkv', 'attn.proj'])
+            trainable_modules (list[str], default []) — block attr names
+                (e.g. 'norm1','norm2','ls1','ls2') kept trainable after the
+                per-block freeze.
 
         Blocks not named in either list remain fully trainable.
         """
@@ -315,34 +321,54 @@ class MAR_DINO_0416(nn.Module):
                     "expected nn.Parameter or nn.Module"
                 )
 
-        # 2. A block cannot appear in both the freeze and LoRA lists.
-        overlap = set(freeze_dino_blocks) & set(lora_dino_blocks)
-        if overlap:
-            raise ValueError(
-                f"blocks {sorted(overlap)} appear in both "
-                "freeze_dino_blocks and lora_dino_blocks"
-            )
-
-        # 3. Freeze whole blocks.
-        for idx in freeze_dino_blocks:
+        # 2. Freeze whole blocks — union of freeze_dino_blocks and
+        #    lora_dino_blocks. LoRA blocks get freed back up in step 3.
+        blocks_to_freeze = set(freeze_dino_blocks) | set(lora_dino_blocks)
+        for idx in blocks_to_freeze:
             for p in self.dinov2_backbone.blocks[idx].parameters():
                 p.requires_grad_(False)
 
-        # 4. Apply LoRA to the selected blocks.
+        # 3. Apply LoRA and/or unfreeze selective submodules on the LoRA blocks.
         if lora_dino_blocks:
-            if not lora_config or "rank" not in lora_config or "alpha" not in lora_config:
+            if lora_config is None or "rank" not in lora_config:
                 raise ValueError(
-                    "lora_dino_blocks non-empty but lora_config missing rank/alpha"
+                    "lora_dino_blocks non-empty but lora_config missing rank"
                 )
-            from models.lora import wrap_linear_with_lora
             rank = int(lora_config["rank"])
-            alpha = float(lora_config["alpha"])
             dropout = float(lora_config.get("dropout", 0.0))
             target_modules = lora_config.get("target_modules", ["attn.qkv", "attn.proj"])
+            trainable_modules = lora_config.get("trainable_modules", [])
+
+            if rank > 0:
+                if "alpha" not in lora_config:
+                    raise ValueError(
+                        "lora_config missing alpha (required when rank > 0)"
+                    )
+                alpha = float(lora_config["alpha"])
+                from models.lora import wrap_linear_with_lora
+
             for idx in lora_dino_blocks:
                 blk = self.dinov2_backbone.blocks[idx]
-                for tgt in target_modules:
-                    wrap_linear_with_lora(blk, tgt, rank, alpha, dropout)
+                if rank > 0:
+                    for tgt in target_modules:
+                        wrap_linear_with_lora(blk, tgt, rank, alpha, dropout)
+                for name in trainable_modules:
+                    if not hasattr(blk, name):
+                        raise ValueError(
+                            f"block[{idx}] has no attribute '{name}' "
+                            "(trainable_modules)"
+                        )
+                    obj = getattr(blk, name)
+                    if isinstance(obj, nn.Parameter):
+                        obj.requires_grad_(True)
+                    elif isinstance(obj, nn.Module):
+                        for p in obj.parameters():
+                            p.requires_grad_(True)
+                    else:
+                        raise TypeError(
+                            f"block[{idx}].{name} is {type(obj).__name__}, "
+                            "expected nn.Parameter or nn.Module"
+                        )
 
     def _dino_attn_fp32(self):
         """Monkey-patch each DINOv2 attention block to run QKV + SDPA in fp32.

@@ -294,8 +294,9 @@ def add_weight_decay(model, weight_decay=1e-5, skip_list=()):
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue  # frozen weights
-        if len(param.shape) == 1 or name.endswith(".bias") or name in skip_list or 'diffloss' in name:
-            no_decay.append(param)  # no weight decay on bias, norm and diffloss
+        if (len(param.shape) == 1 or name.endswith(".bias") or name in skip_list
+                or 'diffloss' in name or 'lora_' in name):
+            no_decay.append(param)  # no weight decay on bias, norm, diffloss, LoRA
         else:
             decay.append(param)
     return [
@@ -314,7 +315,8 @@ def build_param_groups_with_warmup_filter(model, weight_decay=1e-5,
        then removes specific params from that warmup set.
        is_wu = matches_include AND NOT matches_exclude.
     2. Weight decay: no_decay for ndim==1, bias, entries in ``skip_list``,
-       or names containing ``diffloss`` (same rule as ``add_weight_decay``).
+       or names containing ``diffloss`` / ``lora_`` (same rule as
+       ``add_weight_decay``).
 
     Returns a list of AdamW-compatible param group dicts.
     """
@@ -336,6 +338,7 @@ def build_param_groups_with_warmup_filter(model, weight_decay=1e-5,
             or name.endswith(".bias")
             or name in skip_list
             or "diffloss" in name
+            or "lora_" in name
         )
         is_wu = (any(name.startswith(p) for p in prefixes)
                  and not any(name.startswith(p) for p in exclude_prefixes))
