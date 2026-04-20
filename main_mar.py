@@ -520,7 +520,8 @@ def main(args):
     n_params_diffloss = sum(p.numel() for p in model.diffloss.parameters() if p.requires_grad)
     print("number of diffloss parameters: {}M".format(n_params_diffloss / 1e6))
 
-    model.print_trainable_parameters()
+    if hasattr(model, 'print_trainable_parameters'):
+        model.print_trainable_parameters()
     model.to(device)
     model_without_ddp = model
 

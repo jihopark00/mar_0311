@@ -2,9 +2,11 @@
 # Multi-GPU evaluation script for MAR models
 # Usage: bash scripts/test.sh
 
+# sleep 10hours
+# sleep 10h
 exps_dir="./ho_mar_0311"
-run_names=( 0409_mar-base_dec-only ) # 0409_mar-base_dec-only) # "0405_marssllatent-base_imgnet") #  "0403_mar-base_imgnet-cache"
-train_steps=( 40)
+run_names=( 0419_mardino-base ) # 0409_mar-base_dec-only) # "0405_marssllatent-base_imgnet") #  "0403_mar-base_imgnet-cache"
+train_steps=( 40 )
 
 for run_name in "${run_names[@]}"; do
     for train_step in "${train_steps[@]}"; do
