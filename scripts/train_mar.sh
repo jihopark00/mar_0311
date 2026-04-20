@@ -8,7 +8,7 @@ wandb_project="ssl2gen"
 wandb_entity="qkrwlgh0314"
 
 # Dataset options: cifar10-hf, tiny-imagenet-hf, mnist-hf, imagenet
-run_name="0419_mardino-base" # "0412_mardino-giant" # 0412_mardino-base
+run_name="0420_mardino0420-base" # "0412_mardino-giant" # 0412_mardino-base
 exps_dir="./ho_mar_0311"
 config=$exps_dir/$run_name/config.yaml
 
