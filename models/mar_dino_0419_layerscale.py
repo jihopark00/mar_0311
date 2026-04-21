@@ -116,6 +116,7 @@ class MAR_DINO_0419_LayerScale(nn.Module):
                  align_dino_embed_loss_weight=0.1,
                  align_dino_embed_loss_type='mse',
                  replace_ls_with_identity=False,
+                 identity_ls_cond=False,
                  ):
         super().__init__()
 
@@ -158,9 +159,14 @@ class MAR_DINO_0419_LayerScale(nn.Module):
         # as a safe starting point, then train separately. Blocks whose
         # original ls* is nn.Identity stay Identity here too (e.g. when
         # `replace_ls_with_identity=True` is applied later).
+        self.identity_ls_cond = identity_ls_cond
         for blk in self.dinov2_backbone.blocks:
-            blk.ls1_cond = copy.deepcopy(blk.ls1)
-            blk.ls2_cond = copy.deepcopy(blk.ls2)
+            if identity_ls_cond:
+                blk.ls1_cond = nn.Identity()
+                blk.ls2_cond = nn.Identity()
+            else:
+                blk.ls1_cond = copy.deepcopy(blk.ls1)
+                blk.ls2_cond = copy.deepcopy(blk.ls2)
             blk.forward = types.MethodType(_dino_block_forward_with_cond, blk)
 
         dino_embed_dim = self.dinov2_backbone.embed_dim
