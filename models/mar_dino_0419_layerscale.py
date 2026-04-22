@@ -102,6 +102,7 @@ class MAR_DINO_0419_LayerScale(nn.Module):
                  dino_attn_fp32=False,
                  dino_ls_fp32=False,
                  diffloss_fp32=False,
+                 diffloss_compile=False,
                  freeze_dino=['patch_embed'], # ['norm', 'cls_token', 'register_tokens', 'mask_token', 'pos_embed'],
                  freeze_dino_blocks=[],
                  lora_dino_blocks=[],
@@ -258,6 +259,9 @@ class MAR_DINO_0419_LayerScale(nn.Module):
         self.diffloss = diffloss_class(**diffloss_kwargs)
         self.diffusion_batch_mul = diffusion_batch_mul
         self.diffloss_fp32 = diffloss_fp32
+        self.diffloss_compile = diffloss_compile
+        if diffloss_compile:
+            self.diffloss.forward = torch.compile(self.diffloss.forward)
 
         # Apply PEFT-style tuning controls to the dinov2 backbone.
         self._apply_dino_tuning(
