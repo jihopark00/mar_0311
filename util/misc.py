@@ -311,8 +311,9 @@ def build_param_groups_with_warmup_filter(model, weight_decay=1e-5,
     """Split trainable params into 4 groups along two axes:
 
     1. Warmup target: ``warmup_param_prefixes`` selects params that receive
-       warmup (empty = no warmup for anyone). ``exclude_warmup_param_prefixes``
-       then removes specific params from that warmup set.
+       warmup (empty = warmup applies to ALL params).
+       ``exclude_warmup_param_prefixes`` then removes specific params from
+       that warmup set.
        is_wu = matches_include AND NOT matches_exclude.
     2. Weight decay: no_decay for ndim==1, bias, entries in ``skip_list``,
        or names containing ``diffloss`` / ``lora_`` (same rule as
@@ -340,8 +341,8 @@ def build_param_groups_with_warmup_filter(model, weight_decay=1e-5,
             or "diffloss" in name
             or "lora_" in name
         )
-        is_wu = (any(name.startswith(p) for p in prefixes)
-                 and not any(name.startswith(p) for p in exclude_prefixes))
+        matches_include = (not prefixes) or any(name.startswith(p) for p in prefixes)
+        is_wu = matches_include and not any(name.startswith(p) for p in exclude_prefixes)
         key = (("wu" if is_wu else "no_wu"), ("nodecay" if no_wd else "decay"))
         buckets[key].append(param)
 
