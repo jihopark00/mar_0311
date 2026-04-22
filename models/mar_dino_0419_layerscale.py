@@ -100,6 +100,7 @@ class MAR_DINO_0419_LayerScale(nn.Module):
                  dinov2_pretrained=True,
                  dinov2_external_pos_embed = False,
                  dino_attn_fp32=False,
+                 dino_ls_fp32=False,
                  diffloss_fp32=False,
                  freeze_dino=['patch_embed'], # ['norm', 'cls_token', 'register_tokens', 'mask_token', 'pos_embed'],
                  freeze_dino_blocks=[],
@@ -268,6 +269,9 @@ class MAR_DINO_0419_LayerScale(nn.Module):
 
         if dino_attn_fp32:
             self._dino_attn_fp32()
+
+        if dino_ls_fp32:
+            self._dino_ls_fp32()
 
         # --------------------------------------------------------------------------
         # REPA: Representation Alignment with a separate frozen dinov2 on raw pixels,
@@ -498,6 +502,28 @@ class MAR_DINO_0419_LayerScale(nn.Module):
 
         for blk in self.dinov2_backbone.blocks:
             blk.attn.forward = types.MethodType(attn_forward_fp32, blk.attn)
+
+    def _dino_ls_fp32(self):
+        """Monkey-patch LayerScale modules (ls1, ls2, ls1_cond, ls2_cond) on each
+        DINOv2 block to run their scaling in fp32.
+
+        Same motivation as `_dino_attn_fp32` but targeted at LayerScale: ViT-g's
+        late-block γ can reach large magnitudes and interact poorly with bf16 on
+        OOD (VAE-latent) inputs. Casting just the γ multiply to fp32 is cheap
+        and keeps the rest of the residual stream in bf16.
+        """
+        import types
+
+        def ls_forward_fp32(self_ls, x):
+            orig_dtype = x.dtype
+            with torch.cuda.amp.autocast(enabled=False):
+                return (x.float() * self_ls.gamma.float()).to(orig_dtype)
+
+        for blk in self.dinov2_backbone.blocks:
+            for name in ('ls1', 'ls2', 'ls1_cond', 'ls2_cond'):
+                ls = getattr(blk, name, None)
+                if ls is not None and hasattr(ls, 'gamma'):
+                    ls.forward = types.MethodType(ls_forward_fp32, ls)
 
     def print_trainable_parameters(self):
         """Print a per-component summary of trainable vs total parameters."""
